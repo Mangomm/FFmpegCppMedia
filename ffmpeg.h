@@ -522,6 +522,8 @@ typedef struct InputStream {
     int got_output;                 // =1:标记该输入流至少已经成功解码一个pkt. see process_input_packet()
 } InputStream;
 
+//typedef struct pthread_t pthread_t;
+typedef pthread_t pthread_t;
 // 封装输入文件相关信息的结构体
 typedef struct InputFile {
     AVFormatContext *ctx; // 输入文件的ctx
@@ -553,7 +555,8 @@ typedef struct InputFile {
     AVThreadMessageQueue *in_thread_queue;      // 该输入文件的线程消息队列.
                                                 // 多个输入文件时,会开启多个线程,每个线程通过av_read_frame读到的pkt会存放到该队列
 
-//    pthread_t thread;           /* thread reading from this file */
+    //pthread_t thread;           /* thread reading from this file */
+    pthread_t *thread;
 //    pthread_t1 *thread;           /* thread reading from this file */
     int non_blocking;           /* reading packets from the thread should not block(从线程读取数据包不应该被阻塞) */
                                 // 存在多个输入文件即多线程读取时,av_read_frame是否阻塞,0=阻塞,1=非阻塞
@@ -911,8 +914,8 @@ public:
 
 
     int transcode_init(void);
-//#ifdef HAVE_THREADS
-#ifdef false
+#ifdef HAVE_THREADS
+//#ifdef false
     static void *input_thread(void *arg);
     void free_input_thread(int i);
     void free_input_threads(void);

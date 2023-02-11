@@ -47,7 +47,7 @@ extern "C"{
 //#include "libavutil/timestamp.h"
 #include "libavutil/bprint.h"
 #include "libavutil/time.h"
-//#include "libavutil/thread.h"
+#include "libavutil/thread.h"
 #include "libavutil/threadmessage.h"
 #include "libavcodec/mathops.h"
 #include "libavformat/os_support.h"
@@ -2927,8 +2927,8 @@ int FFmpegMedia::transcode_init(void)
  *          该函数的处理还是比较简单的.
  * @param arg
  */
-//#if HAVE_THREADS
-#if 0
+#if HAVE_THREADS
+//#if 0
 void *FFmpegMedia::input_thread(void *arg)
 {
     InputFile *f = (InputFile *)arg;
@@ -2997,8 +2997,7 @@ void FFmpegMedia::free_input_thread(int i)
 
     // 3. 回收该线程.
     //pthread_join(f->thread, NULL);
-    pthread_t *tmp = (pthread_t*)(f->thread);
-    pthread_join(*tmp, NULL);
+    pthread_join(*f->thread, NULL);
     f->joined = 1;
 
     // 4. 回收队列
@@ -3115,8 +3114,8 @@ int FFmpegMedia::transcode(void)
 
 #if HAVE_THREADS
     /* 2.存在多个输入文件时，给每个输入文件对应的开辟一个线程. */
-    //if ((ret = init_input_threads()) < 0)
-        //goto fail;
+    if ((ret = init_input_threads()) < 0)
+        goto fail;
 #endif
 
     // 3. 循环转码
@@ -5360,6 +5359,7 @@ int FFmpegMedia::open_input_file(OptionsContext *o, const char *filename)
     f->time_base = (AVRational){ 1, 1 };
 #if HAVE_THREADS
     f->thread_queue_size = o->thread_queue_size > 0 ? o->thread_queue_size : 8;
+    f->thread = (pthread_t *)av_mallocz(sizeof(pthread_t));//tyycode
 #endif
 
     /*9.检测所有编解码器选项是否已经被使用(看open_output_file)*/

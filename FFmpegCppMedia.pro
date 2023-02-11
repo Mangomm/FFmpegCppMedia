@@ -10,7 +10,8 @@ SOURCES += \
 HEADERS += \
     cmdutils.h \
     config.h \
-    ffmpeg.h
+    ffmpeg.h \
+    globalheader.h
 
 
 win32 {
