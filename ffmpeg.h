@@ -556,7 +556,7 @@ typedef struct InputFile {
                                                 // 多个输入文件时,会开启多个线程,每个线程通过av_read_frame读到的pkt会存放到该队列
 
     //pthread_t thread;           /* thread reading from this file */
-    pthread_t *thread;
+    pthread_t *thread;            // tyycode ，记得回收
 //    pthread_t1 *thread;           /* thread reading from this file */
     int non_blocking;           /* reading packets from the thread should not block(从线程读取数据包不应该被阻塞) */
                                 // 存在多个输入文件即多线程读取时,av_read_frame是否阻塞,0=阻塞,1=非阻塞
@@ -916,13 +916,67 @@ public:
     int transcode_init(void);
 #ifdef HAVE_THREADS
 //#ifdef false
-    static void *input_thread(void *arg);
+    static void *input_thread(void *arg);// pthread_create的线程回调函数
     void free_input_thread(int i);
     void free_input_threads(void);
     int init_input_thread(int i);
     int init_input_threads(void);
     int get_input_packet_mt(InputFile *f, AVPacket *pkt);
 #endif
+
+    int read_key(void);
+    void set_tty_echo(int on);
+    int check_keyboard_interaction(int64_t cur_time);
+    void close_output_stream(OutputStream *ost);
+    int need_output(void);
+
+    OutputStream *choose_output(void);
+    int got_eagain(void);
+    void reset_eagain(void);
+    int ifilter_has_all_input_formats(FilterGraph *fg);
+    void cleanup_filtergraph(FilterGraph *fg);
+    int sub2video_prepare(InputStream *ist, InputFilter *ifilter);
+    double get_rotation(AVStream *st);
+    int configure_input_video_filter(FilterGraph *fg, InputFilter *ifilter,
+                                            AVFilterInOut *in);
+    int insert_filter(AVFilterContext **last_filter, int *pad_idx,
+                             const char *filter_name, const char *args);
+    int insert_trim(int64_t start_time, int64_t duration,
+                           AVFilterContext **last_filter, int *pad_idx,
+                           const char *filter_name);
+    int configure_input_audio_filter(FilterGraph *fg, InputFilter *ifilter,
+                                            AVFilterInOut *in);
+    int configure_input_filter(FilterGraph *fg, InputFilter *ifilter,
+                                      AVFilterInOut *in);
+    const enum AVPixelFormat *get_compliance_unofficial_pix_fmts(enum AVCodecID codec_id, const enum AVPixelFormat default_formats[]);
+    enum AVPixelFormat choose_pixel_fmt(AVStream *st, AVCodecContext *enc_ctx, AVCodec *codec, enum AVPixelFormat target);
+    char *choose_pix_fmts(OutputFilter *ofilter);
+    int configure_output_video_filter(FilterGraph *fg, OutputFilter *ofilter, AVFilterInOut *out);
+    char *choose_sample_fmts_ex (OutputFilter *ofilter);
+    char *choose_sample_rates_ex (OutputFilter *ofilter);
+    char *choose_channel_layouts_ex (OutputFilter *ofilter);
+    int configure_output_audio_filter(FilterGraph *fg, OutputFilter *ofilter, AVFilterInOut *out);
+    int configure_output_filter(FilterGraph *fg, OutputFilter *ofilter, AVFilterInOut *out);
+    int sub2video_get_blank_frame(InputStream *ist);
+    void sub2video_copy_rect(uint8_t *dst, int dst_linesize, int w, int h,
+                                    AVSubtitleRect *r);
+    void sub2video_push_ref(InputStream *ist, int64_t pts);
+    void sub2video_update(InputStream *ist, AVSubtitle *sub);
+    int configure_filtergraph(FilterGraph *fg);
+
+    int check_recording_time(OutputStream *ost);
+    void update_benchmark(const char *fmt, ...);
+    char* av_err2str_ex(int errnum, char *str);
+    char* av_ts2str_ex(int errnum, char *str);
+    char* av_ts2timestr_ex(char *str, int64_t ts, AVRational *tb);
+    void do_video_out(OutputFile *of,
+                             OutputStream *ost,
+                             AVFrame *next_picture,
+                             double sync_ipts);
+    int reap_filters(int flush);
+    int transcode_from_filter(FilterGraph *graph, InputStream **best_ist);
+    int transcode_step(void);
+
     int transcode(void);
 
 
@@ -999,6 +1053,20 @@ public:
     int main_return_code = 0;
     volatile int received_nb_signals = 0;
     const char program_name[24] = "ffmpeg";
+
+    volatile int received_sigterm = 0;
+    //volatile int received_nb_signals = 0;
+    //static atomic_int transcode_init_done = ATOMIC_VAR_INIT(0);
+    std::atomic<int> transcode_init_done;
+    volatile int ffmpeg_exited = 0;
+    //int main_return_code = 0;
+
+    int run_as_daemon  = 0;  // 0=前台运行；1=后台运行
+    int nb_frames_dup = 0;
+    unsigned dup_warning = 1000;
+    int nb_frames_drop = 0;
+    //int64_t decode_error_stat[2];// 记录解码的状态.下标0记录的是成功解码的参数,下标1是失败的次数.
+
     // ffmpeg_cmdutil.h global var
     //const char program_name[];
     const int program_birth_year;
@@ -1009,7 +1077,7 @@ public:
     AVDictionary *format_opts, *codec_opts, *resample_opts;
     int hide_banner;
     //atomic_int transcode_init_done = ATOMIC_VAR_INIT(0);
-    std::atomic<int> transcode_init_done;
+    //std::atomic<int> transcode_init_done;
 
     // ffmpeg_opt.c global var
     //float max_error_rate  = 2.0/3;
@@ -1068,6 +1136,7 @@ public:
     // tyy gloabl var
     int argc = 0;
     char **argv = NULL;
+    //char str_debug[AV_ERROR_MAX_STRING_SIZE]; // 用于debug的数组. 注意多线程不能使用
 };
 //extern const OptionDef options[];
 // 硬件的后续完善
