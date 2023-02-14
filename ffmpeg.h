@@ -810,6 +810,13 @@ public:
     void uninit_opts(void);
     void uninit_parse_context(OptionParseContext *octx);
 
+    int parse_option(void *optctx, const char *opt, const char *arg,
+                     const OptionDef *options);
+    FILE *get_preset_file(char *filename, size_t filename_size,
+                          const char *preset_name, int is_path,
+                          const char *codec_name);
+
+
     // ffmpeg_opt.c
     void init_options(OptionsContext *o);
     void uninit_options(OptionsContext *o);
@@ -853,7 +860,7 @@ public:
     int copy_chapters(InputFile *ifile, OutputFile *ofile, int copy_metadata);
     void tyy_print_AVDirnary(AVDictionary *d);
 
-#if 0
+    // 选项参数设置函数
     int opt_map(void *optctx, const char *opt, const char *arg);
     int opt_map_channel(void *optctx, const char *opt, const char *arg);
     int opt_recording_timestamp(void *optctx, const char *opt, const char *arg);
@@ -893,7 +900,50 @@ public:
     int opt_preset(void *optctx, const char *opt, const char *arg);
     int opt_init_hw_device(void *optctx, const char *opt, const char *arg);
     int opt_filter_hw_device(void *optctx, const char *opt, const char *arg);
-#endif
+    int opt_timelimit(void *optctx, const char *opt, const char *arg);
+
+    // tyy wrapper code
+    static int opt_map_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_map_channel_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_recording_timestamp_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_data_frames_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_progress_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_target_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_audio_codec_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_video_channel_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_video_standard_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_video_codec_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_subtitle_codec_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_data_codec_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_vsync_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_abort_on_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_qscale_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_profile_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_video_filters_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_audio_filters_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_filter_complex_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_filter_complex_script_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_attach_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_video_frames_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_audio_frames_ex(void * t, void *optctx, const char *opt, const char *arg);
+    //int opt_data_frames(void *optctx, const char *opt, const char *arg);
+    static int opt_sameq_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_timecode_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_vstats_file_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_vstats_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_old2new_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_bitrate_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_streamid_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int show_hwaccels_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_audio_qscale_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_default_new_ex(void * t, OptionsContext *o, const char *opt, const char *arg);
+    static int opt_channel_layout_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_sdp_file_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_preset_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_init_hw_device_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_filter_hw_device_ex(void * t, void *optctx, const char *opt, const char *arg);
+    static int opt_timelimit_ex(void * t, void *optctx, const char *opt, const char *arg);
+
 
     // ffmpeg_filters.c
     int init_simple_filtergraph(InputStream *ist, OutputStream *ost);
@@ -937,6 +987,7 @@ public:
 
     // tyy func
     void init_g_options();
+    void memset_zero_fm();
 
 public:
     // ffmpeg.c
@@ -1126,8 +1177,8 @@ public:
 
     const AVIOInterruptCB int_cb;
 
-    OptionDef options[178];
-    //OptionDef *options = NULL;
+    //OptionDef options[178];
+    OptionDef *options = NULL;             // 指向ffmpeg的所有选项数组
     //const HWAccel hwaccels[];
     AVBufferRef *hw_device_ctx = NULL;
     #if CONFIG_QSV
@@ -1232,7 +1283,6 @@ public:
     // tyy gloabl var
     int argc = 0;
     char **argv = NULL;
-    //char str_debug[AV_ERROR_MAX_STRING_SIZE]; // 用于debug的数组. 注意多线程不能使用
 };
 //extern const OptionDef options[];
 // 硬件的后续完善

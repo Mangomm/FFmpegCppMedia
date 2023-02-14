@@ -308,15 +308,16 @@ FFmpegMedia::FFmpegMedia():
     int_cb({ decode_interrupt_cb, this }),
     program_birth_year(2000)
 {
+    memset_zero_fm();
     init_g_options();
     transcode_init_done = 0;
 }
 
 FFmpegMedia::~FFmpegMedia(){
-//    if(options){
-//        delete options;
-//        options = NULL;
-//    }
+    if(options){
+        delete options;
+        options = NULL;
+    }
 }
 
 void FFmpegMedia::init_dynload(){
@@ -1234,7 +1235,7 @@ void FFmpegMedia::exit_program(int ret)
     ffmpeg_cleanup(ret);
 
     // 2. 退出进程
-    av_log(NULL, AV_LOG_WARNING, "exit_program ret: %d.\n", ret);
+    av_log(NULL, AV_LOG_FATAL, "exit_program ret: %d.\n", ret);
     //print_error("test", ret);
     exit(ret);
 }
@@ -1395,6 +1396,143 @@ HWDevice *FFmpegMedia::hw_device_get_by_name(const char *name)
             return hw_devices[i];
     }
     return NULL;
+}
+
+int FFmpegMedia::hw_device_init_from_string(const char *arg, HWDevice **dev_out)
+{
+    // "type=name:device,key=value,key2=value2"
+    // "type:device,key=value,key2=value2"
+    // -> av_hwdevice_ctx_create()
+    // "type=name@name"
+    // "type@name"
+    // -> av_hwdevice_ctx_create_derived()
+
+    AVDictionary *options = NULL;
+    const char *type_name = NULL, *name = NULL, *device = NULL;
+    enum AVHWDeviceType type;
+    HWDevice *dev, *src;
+    AVBufferRef *device_ref = NULL;
+    int err;
+    const char *errmsg, *p, *q;
+    size_t k;
+
+    k = strcspn(arg, ":=@");
+    p = arg + k;
+
+    type_name = av_strndup(arg, k);
+    if (!type_name) {
+        err = AVERROR(ENOMEM);
+        goto fail;
+    }
+    type = av_hwdevice_find_type_by_name(type_name);
+    if (type == AV_HWDEVICE_TYPE_NONE) {
+        errmsg = "unknown device type";
+        goto invalid;
+    }
+
+    if (*p == '=') {
+        k = strcspn(p + 1, ":@");
+
+        name = av_strndup(p + 1, k);
+        if (!name) {
+            err = AVERROR(ENOMEM);
+            goto fail;
+        }
+        if (hw_device_get_by_name(name)) {
+            errmsg = "named device already exists";
+            goto invalid;
+        }
+
+        p += 1 + k;
+    } else {
+        name = hw_device_default_name(type);
+        if (!name) {
+            err = AVERROR(ENOMEM);
+            goto fail;
+        }
+    }
+
+    if (!*p) {
+        // New device with no parameters.
+        err = av_hwdevice_ctx_create(&device_ref, type,
+                                     NULL, NULL, 0);
+        if (err < 0)
+            goto fail;
+
+    } else if (*p == ':') {
+        // New device with some parameters.
+        ++p;
+        q = strchr(p, ',');
+        if (q) {
+            if (q - p > 0) {
+                device = av_strndup(p, q - p);
+                if (!device) {
+                    err = AVERROR(ENOMEM);
+                    goto fail;
+                }
+            }
+            err = av_dict_parse_string(&options, q + 1, "=", ",", 0);
+            if (err < 0) {
+                errmsg = "failed to parse options";
+                goto invalid;
+            }
+        }
+
+        err = av_hwdevice_ctx_create(&device_ref, type,
+                                     q ? device : p[0] ? p : NULL,
+                                     options, 0);
+        if (err < 0)
+            goto fail;
+
+    } else if (*p == '@') {
+        // Derive from existing device.
+
+        src = hw_device_get_by_name(p + 1);
+        if (!src) {
+            errmsg = "invalid source device name";
+            goto invalid;
+        }
+
+        err = av_hwdevice_ctx_create_derived(&device_ref, type,
+                                             src->device_ref, 0);
+        if (err < 0)
+            goto fail;
+    } else {
+        errmsg = "parse error";
+        goto invalid;
+    }
+
+    dev = hw_device_add();
+    if (!dev) {
+        err = AVERROR(ENOMEM);
+        goto fail;
+    }
+
+    dev->name = name;
+    dev->type = type;
+    dev->device_ref = device_ref;
+
+    if (dev_out)
+        *dev_out = dev;
+
+    name = NULL;
+    err = 0;
+done:
+    av_freep(&type_name);
+    av_freep(&name);
+    av_freep(&device);
+    av_dict_free(&options);
+    return err;
+invalid:
+    av_log(NULL, AV_LOG_ERROR,
+           "Invalid device specification \"%s\": %s\n", arg, errmsg);
+    err = AVERROR(EINVAL);
+    goto done;
+fail:
+    av_log(NULL, AV_LOG_ERROR,
+           "Device creation failed: %d.\n", err);
+    av_buffer_unref(&device_ref);
+    goto done;
 }
 
 void FFmpegMedia::hw_device_free_all(void)
@@ -9537,7 +9675,8 @@ int FFmpegMedia::write_option(void *optctx, const OptionDef *po, const char *opt
     } else if (po->flags & OPT_DOUBLE) {
         *(double *)dst = parse_number_or_die(opt, arg, OPT_DOUBLE, -INFINITY, INFINITY);
     } else if (po->u.func_arg) {// 回调参数处理
-        int ret = po->u.func_arg(optctx, opt, arg);
+        //int ret = po->u.func_arg(optctx, opt, arg);
+        int ret = po->u.func_arg(this, optctx, opt, arg);// tyycode
         if (ret < 0) {
             char str[AV_ERROR_MAX_STRING_SIZE] = {0};
             av_log(NULL, AV_LOG_ERROR,
@@ -9832,8 +9971,6 @@ do {                                                                           \
     return 0;
 }
 
-#if 0
-
 int FFmpegMedia::opt_map(void *optctx, const char *opt, const char *arg)
 {
     OptionsContext *o = (OptionsContext *)optctx;
@@ -10074,6 +10211,12 @@ int FFmpegMedia::opt_progress(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
+int FFmpegMedia::opt_audio_codec(void *optctx, const char *opt, const char *arg)
+{
+    OptionsContext *o = (OptionsContext *)optctx;
+    return parse_option(o, "codec:a", arg, options);
+}
+
 int FFmpegMedia::opt_video_channel(void *optctx, const char *opt, const char *arg)
 {
     av_log(NULL, AV_LOG_WARNING, "This option is deprecated, use -channel.\n");
@@ -10084,12 +10227,6 @@ int FFmpegMedia::opt_video_standard(void *optctx, const char *opt, const char *a
 {
     av_log(NULL, AV_LOG_WARNING, "This option is deprecated, use -standard.\n");
     return opt_default(optctx, "standard", arg);
-}
-
-int FFmpegMedia::opt_audio_codec(void *optctx, const char *opt, const char *arg)
-{
-    OptionsContext *o = (OptionsContext *)optctx;
-    return parse_option(o, "codec:a", arg, options);
 }
 
 int FFmpegMedia::opt_video_codec(void *optctx, const char *opt, const char *arg)
@@ -10265,12 +10402,14 @@ int FFmpegMedia::opt_vsync(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
+
 // 中止指定的条件标志
 int FFmpegMedia::opt_abort_on(void *optctx, const char *opt, const char *arg)
 {
+    // C++要求opts结构体内的每个成员变量都要赋值，不然会报: Makefile error xxx这种错误
     static const AVOption opts[] = {
-        { "abort_on"        , NULL, 0, AV_OPT_TYPE_FLAGS, { .i64 = 0 }, (double)INT64_MIN, (double)INT64_MAX, .unit = "flags" },
-        { "empty_output"    , NULL, 0, AV_OPT_TYPE_CONST, { .i64 = ABORT_ON_FLAG_EMPTY_OUTPUT     }, (double)INT64_MIN, (double)INT64_MAX, .unit = "flags" },
+        { "abort_on"        , NULL, 0, AV_OPT_TYPE_FLAGS, { .i64 = 0 }, (double)INT64_MIN, (double)INT64_MAX, 0, .unit = "flags" },
+        { "empty_output"    , NULL, 0, AV_OPT_TYPE_CONST, { .i64 = ABORT_ON_FLAG_EMPTY_OUTPUT     }, (double)INT64_MIN, (double)INT64_MAX, 0, .unit = "flags" },
         { NULL },
     };
     static const AVClass avclass = {
@@ -10559,6 +10698,56 @@ int FFmpegMedia::opt_sdp_file(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
+FILE *FFmpegMedia::get_preset_file(char *filename, size_t filename_size,
+                      const char *preset_name, int is_path,
+                      const char *codec_name)
+{
+    FILE *f = NULL;
+    int i;
+    const char *base[3] = { getenv("FFMPEG_DATADIR"),
+                            getenv("HOME"),
+                            FFMPEG_DATADIR, };
+
+    if (is_path) {
+        av_strlcpy(filename, preset_name, filename_size);
+        f = fopen(filename, "r");
+    } else {
+#ifdef _WIN32
+        char datadir[MAX_PATH], *ls;
+        base[2] = NULL;
+
+        if (GetModuleFileNameA(GetModuleHandleA(NULL), datadir, sizeof(datadir) - 1))
+        {
+            for (ls = datadir; ls < datadir + strlen(datadir); ls++)
+                if (*ls == '\\') *ls = '/';
+
+            if (ls = strrchr(datadir, '/'))
+            {
+                *ls = 0;
+                strncat(datadir, "/ffpresets",  sizeof(datadir) - 1 - strlen(datadir));
+                base[2] = datadir;
+            }
+        }
+#endif
+        for (i = 0; i < 3 && !f; i++) {
+            if (!base[i])
+                continue;
+            snprintf(filename, filename_size, "%s%s/%s.ffpreset", base[i],
+                     i != 1 ? "" : "/.ffmpeg", preset_name);
+            f = fopen(filename, "r");
+            if (!f && codec_name) {
+                snprintf(filename, filename_size,
+                         "%s%s/%s-%s.ffpreset",
+                         base[i], i != 1 ? "" : "/.ffmpeg", codec_name,
+                         preset_name);
+                f = fopen(filename, "r");
+            }
+        }
+    }
+
+    return f;
+}
+
 int FFmpegMedia::opt_preset(void *optctx, const char *opt, const char *arg)
 {
     OptionsContext *o = (OptionsContext *)optctx;
@@ -10623,141 +10812,162 @@ int FFmpegMedia::opt_init_hw_device(void *optctx, const char *opt, const char *a
     }
 }
 
-int FFmpegMedia::hw_device_init_from_string(const char *arg, HWDevice **dev_out)
-{
-    // "type=name:device,key=value,key2=value2"
-    // "type:device,key=value,key2=value2"
-    // -> av_hwdevice_ctx_create()
-    // "type=name@name"
-    // "type@name"
-    // -> av_hwdevice_ctx_create_derived()
-
-    AVDictionary *options = NULL;
-    const char *type_name = NULL, *name = NULL, *device = NULL;
-    enum AVHWDeviceType type;
-    HWDevice *dev, *src;
-    AVBufferRef *device_ref = NULL;
-    int err;
-    const char *errmsg, *p, *q;
-    size_t k;
-
-    k = strcspn(arg, ":=@");
-    p = arg + k;
-
-    type_name = av_strndup(arg, k);
-    if (!type_name) {
-        err = AVERROR(ENOMEM);
-        goto fail;
-    }
-    type = av_hwdevice_find_type_by_name(type_name);
-    if (type == AV_HWDEVICE_TYPE_NONE) {
-        errmsg = "unknown device type";
-        goto invalid;
-    }
-
-    if (*p == '=') {
-        k = strcspn(p + 1, ":@");
-
-        name = av_strndup(p + 1, k);
-        if (!name) {
-            err = AVERROR(ENOMEM);
-            goto fail;
-        }
-        if (hw_device_get_by_name(name)) {
-            errmsg = "named device already exists";
-            goto invalid;
-        }
-
-        p += 1 + k;
-    } else {
-        name = hw_device_default_name(type);
-        if (!name) {
-            err = AVERROR(ENOMEM);
-            goto fail;
-        }
-    }
-
-    if (!*p) {
-        // New device with no parameters.
-        err = av_hwdevice_ctx_create(&device_ref, type,
-                                     NULL, NULL, 0);
-        if (err < 0)
-            goto fail;
-
-    } else if (*p == ':') {
-        // New device with some parameters.
-        ++p;
-        q = strchr(p, ',');
-        if (q) {
-            if (q - p > 0) {
-                device = av_strndup(p, q - p);
-                if (!device) {
-                    err = AVERROR(ENOMEM);
-                    goto fail;
-                }
-            }
-            err = av_dict_parse_string(&options, q + 1, "=", ",", 0);
-            if (err < 0) {
-                errmsg = "failed to parse options";
-                goto invalid;
-            }
-        }
-
-        err = av_hwdevice_ctx_create(&device_ref, type,
-                                     q ? device : p[0] ? p : NULL,
-                                     options, 0);
-        if (err < 0)
-            goto fail;
-
-    } else if (*p == '@') {
-        // Derive from existing device.
-
-        src = hw_device_get_by_name(p + 1);
-        if (!src) {
-            errmsg = "invalid source device name";
-            goto invalid;
-        }
-
-        err = av_hwdevice_ctx_create_derived(&device_ref, type,
-                                             src->device_ref, 0);
-        if (err < 0)
-            goto fail;
-    } else {
-        errmsg = "parse error";
-        goto invalid;
-    }
-
-    dev = hw_device_add();
-    if (!dev) {
-        err = AVERROR(ENOMEM);
-        goto fail;
-    }
-
-    dev->name = name;
-    dev->type = type;
-    dev->device_ref = device_ref;
-
-    if (dev_out)
-        *dev_out = dev;
-
-    name = NULL;
-    err = 0;
-done:
-    av_freep(&type_name);
-    av_freep(&name);
-    av_freep(&device);
-    av_dict_free(&options);
-    return err;
-invalid:
-    av_log(NULL, AV_LOG_ERROR,
-           "Invalid device specification \"%s\": %s\n", arg, errmsg);
-    err = AVERROR(EINVAL);
-    goto done;
-fail:
-    av_log(NULL, AV_LOG_ERROR,
-           "Device creation failed: %d.\n", err);
-    av_buffer_unref(&device_ref);
-    goto done;
+int FFmpegMedia::opt_map_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_map(optctx, opt, arg);
+}
+int FFmpegMedia::opt_map_channel_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_map_channel(optctx, opt, arg);
+}
+int FFmpegMedia::opt_recording_timestamp_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_recording_timestamp(optctx, opt, arg);
+}
+int FFmpegMedia::opt_data_frames_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_data_frames(optctx, opt, arg);
+}
+int FFmpegMedia::opt_progress_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_progress(optctx, opt, arg);
+}
+int FFmpegMedia::opt_target_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_target(optctx, opt, arg);
+}
+int FFmpegMedia::opt_audio_codec_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_audio_codec(optctx, opt, arg);
+}
+int FFmpegMedia::opt_video_channel_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_video_channel(optctx, opt, arg);
+}
+int FFmpegMedia::opt_video_standard_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_video_standard(optctx, opt, arg);
+}
+int FFmpegMedia::opt_video_codec_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_video_codec(optctx, opt, arg);
+}
+int FFmpegMedia::opt_subtitle_codec_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_subtitle_codec(optctx, opt, arg);
+}
+int FFmpegMedia::opt_data_codec_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_data_codec(optctx, opt, arg);
+}
+int FFmpegMedia::opt_vsync_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_vsync(optctx, opt, arg);
+}
+int FFmpegMedia::opt_abort_on_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_abort_on(optctx, opt, arg);
+}
+int FFmpegMedia::opt_qscale_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_qscale(optctx, opt, arg);
+}
+int FFmpegMedia::opt_profile_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_profile(optctx, opt, arg);
+}
+int FFmpegMedia::opt_video_filters_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_video_filters(optctx, opt, arg);
+}
+int FFmpegMedia::opt_audio_filters_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_audio_filters(optctx, opt, arg);
+}
+int FFmpegMedia::opt_filter_complex_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_filter_complex(optctx, opt, arg);
+}
+int FFmpegMedia::opt_filter_complex_script_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_filter_complex_script(optctx, opt, arg);
+}
+int FFmpegMedia::opt_attach_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_attach(optctx, opt, arg);
+}
+int FFmpegMedia::opt_video_frames_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_video_frames(optctx, opt, arg);
+}
+int FFmpegMedia::opt_audio_frames_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_audio_frames(optctx, opt, arg);
+}
+//int opt_data_frames(void *optctx, const char *opt, const char *arg);
+int FFmpegMedia::opt_sameq_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_sameq(optctx, opt, arg);
+}
+int FFmpegMedia::opt_timecode_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_timecode(optctx, opt, arg);
+}
+int FFmpegMedia::opt_vstats_file_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_vstats_file(optctx, opt, arg);
+}
+int FFmpegMedia::opt_vstats_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_vstats(optctx, opt, arg);
+}
+int FFmpegMedia::opt_old2new_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_old2new(optctx, opt, arg);
+}
+int FFmpegMedia::opt_bitrate_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_bitrate(optctx, opt, arg);
+}
+int FFmpegMedia::opt_streamid_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_streamid(optctx, opt, arg);
+}
+int FFmpegMedia::show_hwaccels_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->show_hwaccels(optctx, opt, arg);
+}
+int FFmpegMedia::opt_audio_qscale_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_audio_qscale(optctx, opt, arg);
+}
+int FFmpegMedia::opt_default_new_ex(void * t, OptionsContext *o, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_default_new(o, opt, arg);
+}
+int FFmpegMedia::opt_channel_layout_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_channel_layout(optctx, opt, arg);
+}
+int FFmpegMedia::opt_sdp_file_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_sdp_file(optctx, opt, arg);
+}
+int FFmpegMedia::opt_preset_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_preset(optctx, opt, arg);
+}
+int FFmpegMedia::opt_init_hw_device_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_init_hw_device(optctx, opt, arg);
+}
+int FFmpegMedia::opt_filter_hw_device_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_filter_hw_device(optctx, opt, arg);
+}
+int FFmpegMedia::opt_timelimit_ex(void * t, void *optctx, const char *opt, const char *arg){
+    auto fm = (FFmpegMedia*)t;
+    return fm->opt_timelimit(optctx, opt, arg);
 }
 
 int FFmpegMedia::opt_filter_hw_device(void *optctx, const char *opt, const char *arg)
@@ -10774,16 +10984,154 @@ int FFmpegMedia::opt_filter_hw_device(void *optctx, const char *opt, const char 
     return 0;
 }
 
+int FFmpegMedia::opt_timelimit(void *optctx, const char *opt, const char *arg)
+{
+#if HAVE_SETRLIMIT
+    int lim = parse_number_or_die(opt, arg, OPT_INT64, 0, INT_MAX);
+    struct rlimit rl = { lim, lim + 1 };
+    if (setrlimit(RLIMIT_CPU, &rl))
+        perror("setrlimit");
+#else
+    av_log(NULL, AV_LOG_WARNING, "-%s not implemented on this OS\n", opt);
 #endif
+    return 0;
+}
+
+void FFmpegMedia::memset_zero_fm(){
+    // ffmpeg.h global var
+    input_streams = NULL;
+    nb_input_streams = 0;         // input_streams二维数组大小
+
+    input_files = NULL;           // 用于保存多个输入文件
+    nb_input_files = 0;           // 输入文件个数
+
+    output_streams = NULL;       // 保存各个输出流的数组
+    nb_output_streams = 0;       // output_streams二维数组大小
+
+    output_files = NULL;         // 用于保存多个输出文件
+    nb_output_files = 0;         // 输出文件个数
+
+    filtergraphs = NULL;          // 封装好的系统过滤器数组，每个FilterGraph都会包含对应输入流与输出流的的输入输出过滤器。可看init_simple_filtergraph函数
+    nb_filtergraphs = 0;          // filtergraphs数组的大小
+
+    progress_avio = NULL;
+    //float max_error_rate;
+    videotoolbox_pixfmt = NULL;
+
+    //const AVIOInterruptCB int_cb;
+    //memset((void*)&int_cb, 0, sizeof(int_cb));
+
+    //OptionDef options[178];
+    options = NULL;             // 指向ffmpeg的所有选项数组
+    //const HWAccel hwaccels[];
+    hw_device_ctx = NULL;
+#if CONFIG_QSV
+    qsv_device = NULL;
+#endif
+    filter_hw_device = NULL;          // -filter_hw_device选项
+
+
+    // ffmpeg.c global var
+    want_sdp = -1;
+    //BenchmarkTimeStamps current_time;
+    memset((void*)&current_time, 0, sizeof(BenchmarkTimeStamps));
+
+    //decode_error_stat[2];// 记录解码的状态.下标0记录的是成功解码的参数,下标1是失败的次数.
+    main_return_code = 0;
+    received_nb_signals = 0;
+    //program_name[24] = "ffmpeg";
+
+    received_sigterm = 0;
+    transcode_init_done = 0;
+    ffmpeg_exited = 0;
+
+    run_as_daemon  = 0;  // 0=前台运行；1=后台运行
+    nb_frames_dup = 0;
+    dup_warning = 1000;
+    nb_frames_drop = 0;
+
+    // ffmpeg_cmdutil.h global var
+    //program_birth_year = 2023;
+    avcodec_opts[AVMEDIA_TYPE_NB];
+    memset(avcodec_opts, 0, sizeof (avcodec_opts));
+    avformat_opts = NULL;
+    sws_dict = NULL;
+    swr_opts = NULL;
+    format_opts = codec_opts = resample_opts = NULL;
+    //hide_banner;
+
+    vstats_file = NULL;
+
+    subtitle_out = NULL;
+
+    // ffmpeg_opt.c global var
+    //float max_error_rate  = 2.0/3;
+    vstats_filename = NULL;
+    sdp_filename = NULL;
+
+    audio_drift_threshold = 0.1;
+    dts_delta_threshold   = 10;
+    dts_error_threshold   = 3600*30;  // dts错误阈值,默认30小时.帧能被解码的最大阈值大小？
+
+    audio_volume      = 256;            // -vol选项,默认256
+    audio_sync_method = 0;              // 音频同步方法.默认0
+    video_sync_method = VSYNC_AUTO;
+    frame_drop_threshold = 0;
+    do_deinterlace    = 0;              // -deinterlace选项,默认0.
+    do_benchmark      = 0;
+    do_benchmark_all  = 0;              // -benchmark_all选项，默认0
+    do_hex_dump       = 0;
+    do_pkt_dump       = 0;
+    copy_ts           = 0;              // copy timestamps,默认0
+    start_at_zero     = 0;              // 使用copy_ts时，将输入时间戳移至0开始,默认0
+    copy_tb           = -1;
+    debug_ts          = 0;              // 是否打印相关时间戳.-debug_ts选项
+    exit_on_error     = 0;              // xerror选项,默认是0
+    abort_on_flags    = 0;
+    print_stats       = -1;             // -stats选项,默认-1,在编码期间打印进度报告.
+    qp_hist           = 0;              // -qphist选项,默认0,显示QP直方图
+    stdin_interaction = 1;              // 可认为是否是交互模式.除pipe、以及/dev/stdin值为0，其它例如普通文件、实时流都是1
+    frame_bits_per_raw_sample = 0;
+    max_error_rate  = 2.0/3;
+    filter_nbthreads = 0;               // -filter_threads选项,默认0,非复杂过滤器线程数.
+    filter_complex_nbthreads = 0;       // -filter_complex_threads选项,默认0,复杂过滤器线程数.
+    vstats_version = 2;                 // -vstats_version选项, 默认2, 要使用的vstats格式的版本
+
+
+    intra_only         = 0;
+    file_overwrite     = 0;      // -y选项，重写输出文件，即覆盖该输出文件。0=不重写，1=重写，
+                                            // 不过为0时且no_file_overwrite=0时会在终端询问用户是否重写
+    no_file_overwrite  = 0;      // -n选项，不重写输出文件。0=不重写，1=重写
+    do_psnr            = 0;
+    input_sync;
+    input_stream_potentially_available = 0;// 标记，=1代表该输入文件可能是可用的
+    ignore_unknown_streams = 0;
+    copy_unknown_streams = 0;
+    find_stream_info = 1;
+
+
+    // ffmpeg_cmdutil.c global var
+    win32_argv_utf8 = NULL;
+    win32_argc = 0;
+
+    // ffmpeg_hw.c global var
+    nb_hw_devices;           // 用户电脑支持的硬件设备数
+    hw_devices = NULL;       // 用户电脑支持的硬件设备数组
+
+    // tyy gloabl var
+    argc = 0;
+    argv = NULL;
+}
 
 void FFmpegMedia::init_g_options(){
-#if 0
+#if 1
     // offsetof是一个C函数:返回字节对齐后，成员在结构体中的偏移量.
     // 要获取OptionsContext.xxx成员的地址，我们看到write_option()时需要加上OptionsContext变量的首地址.例如(&o + options[0].off)
     #define OFFSET(x) offsetof(OptionsContext, x)
-    const OptionDef options[] = {
+    //const OptionDef tmpoptions[] = {
+    OptionDef tmpoptions[] = {
         /* main options */
-        CMDUTILS_COMMON_OPTIONS
+        //CMDUTILS_COMMON_OPTIONS/* 暂时不要这些选项 */
         { "f",              HAS_ARG | OPT_STRING | OPT_OFFSET |
                             OPT_INPUT | OPT_OUTPUT,                      { .off       = OFFSET(format) },
             "force format", "fmt" },
@@ -10805,10 +11153,10 @@ void FFmpegMedia::init_g_options(){
                             OPT_OUTPUT,                                  { .off       = OFFSET(presets) },
             "preset name", "preset" },
         { "map",            HAS_ARG | OPT_EXPERT | OPT_PERFILE |
-                            OPT_OUTPUT,                                  { .func_arg = opt_map },
+                            OPT_OUTPUT,                                  { .func_arg = opt_map_ex },
             "set input stream mapping",
             "[-]input_file_id[:stream_specifier][,sync_file_id[:stream_specifier]]" },
-        { "map_channel",    HAS_ARG | OPT_EXPERT | OPT_PERFILE | OPT_OUTPUT, { .func_arg = opt_map_channel },
+        { "map_channel",    HAS_ARG | OPT_EXPERT | OPT_PERFILE | OPT_OUTPUT, { .func_arg = opt_map_channel_ex },
             "map an audio channel from one stream to another", "file.stream.channel[:syncfile.syncstream]" },
         { "map_metadata",   HAS_ARG | OPT_STRING | OPT_SPEC |
                             OPT_OUTPUT,                                  { .off       = OFFSET(metadata_map) },
@@ -10843,24 +11191,24 @@ void FFmpegMedia::init_g_options(){
         { "itsscale",       HAS_ARG | OPT_DOUBLE | OPT_SPEC |
                             OPT_EXPERT | OPT_INPUT,                      { .off = OFFSET(ts_scale) },
             "set the input ts scale", "scale" },
-        { "timestamp",      HAS_ARG | OPT_PERFILE | OPT_OUTPUT,          { .func_arg = opt_recording_timestamp },
+        { "timestamp",      HAS_ARG | OPT_PERFILE | OPT_OUTPUT,          { .func_arg = opt_recording_timestamp_ex },
             "set the recording timestamp ('now' to set the current time)", "time" },
         { "metadata",       HAS_ARG | OPT_STRING | OPT_SPEC | OPT_OUTPUT, { .off = OFFSET(metadata) },
             "add metadata", "string=string" },
         { "program",        HAS_ARG | OPT_STRING | OPT_SPEC | OPT_OUTPUT, { .off = OFFSET(program) },
             "add program with specified streams", "title=string:st=number..." },
         { "dframes",        HAS_ARG | OPT_PERFILE | OPT_EXPERT |
-                            OPT_OUTPUT,                                  { .func_arg = opt_data_frames },
+                            OPT_OUTPUT,                                  { .func_arg = opt_data_frames_ex },
             "set the number of data frames to output", "number" },
         { "benchmark",      OPT_BOOL | OPT_EXPERT,                       { &do_benchmark },
             "add timings for benchmarking" },
         { "benchmark_all",  OPT_BOOL | OPT_EXPERT,                       { &do_benchmark_all },
           "add timings for each task" },
-        { "progress",       HAS_ARG | OPT_EXPERT,                        { .func_arg = opt_progress },
+        { "progress",       HAS_ARG | OPT_EXPERT,                        { .func_arg = opt_progress_ex },
           "write program-readable progress information", "url" },
         { "stdin",          OPT_BOOL | OPT_EXPERT,                       { &stdin_interaction },
           "enable or disable interaction on standard input" },
-        { "timelimit",      HAS_ARG | OPT_EXPERT,                        { .func_arg = opt_timelimit },
+        { "timelimit",      HAS_ARG | OPT_EXPERT,                        { .func_arg = opt_timelimit_ex },
             "set max runtime in seconds", "limit" },
         { "dump",           OPT_BOOL | OPT_EXPERT,                       { &do_pkt_dump },
             "dump each input packet" },
@@ -10869,10 +11217,10 @@ void FFmpegMedia::init_g_options(){
         { "re",             OPT_BOOL | OPT_EXPERT | OPT_OFFSET |
                             OPT_INPUT,                                   { .off = OFFSET(rate_emu) },
             "read input at native frame rate", "" },
-        { "target",         HAS_ARG | OPT_PERFILE | OPT_OUTPUT,          { .func_arg = opt_target },
+        { "target",         HAS_ARG | OPT_PERFILE | OPT_OUTPUT,          { .func_arg = opt_target_ex },
             "specify target file type (\"vcd\", \"svcd\", \"dvd\", \"dv\" or \"dv50\" "
             "with optional prefixes \"pal-\", \"ntsc-\" or \"film-\")", "type" },
-        { "vsync",          HAS_ARG | OPT_EXPERT,                        { .func_arg = opt_vsync },
+        { "vsync",          HAS_ARG | OPT_EXPERT,                        { .func_arg = opt_vsync_ex },
             "video sync method", "" },
         { "frame_drop_threshold", HAS_ARG | OPT_FLOAT | OPT_EXPERT,      { &frame_drop_threshold },
             "frame drop threshold", "" },
@@ -10901,7 +11249,7 @@ void FFmpegMedia::init_g_options(){
             "timestamp error delta threshold", "threshold" },
         { "xerror",         OPT_BOOL | OPT_EXPERT,                       { &exit_on_error },
             "exit on error", "error" },
-        { "abort_on",       HAS_ARG | OPT_EXPERT,                        { .func_arg = opt_abort_on },
+        { "abort_on",       HAS_ARG | OPT_EXPERT,                        { .func_arg = opt_abort_on_ex },
             "abort on the specified condition flags", "flags" },
         { "copyinkf",       OPT_BOOL | OPT_EXPERT | OPT_SPEC |
                             OPT_OUTPUT,                                  { .off = OFFSET(copy_initial_nonkeyframes) },
@@ -10917,9 +11265,9 @@ void FFmpegMedia::init_g_options(){
                             OPT_SPEC | OPT_OUTPUT,                       { .off = OFFSET(qscale) },
             "use fixed quality scale (VBR)", "q" },
         { "qscale",         HAS_ARG | OPT_EXPERT | OPT_PERFILE |
-                            OPT_OUTPUT,                                  { .func_arg = opt_qscale },
+                            OPT_OUTPUT,                                  { .func_arg = opt_qscale_ex },
             "use fixed quality scale (VBR)", "q" },
-        { "profile",        HAS_ARG | OPT_EXPERT | OPT_PERFILE | OPT_OUTPUT, { .func_arg = opt_profile },
+        { "profile",        HAS_ARG | OPT_EXPERT | OPT_PERFILE | OPT_OUTPUT, { .func_arg = opt_profile_ex },
             "set profile", "profile" },
         { "filter",         HAS_ARG | OPT_STRING | OPT_SPEC | OPT_OUTPUT, { .off = OFFSET(filters) },
             "set stream filtergraph", "filter_graph" },
@@ -10929,18 +11277,18 @@ void FFmpegMedia::init_g_options(){
             "read stream filtergraph description from a file", "filename" },
         { "reinit_filter",  HAS_ARG | OPT_INT | OPT_SPEC | OPT_INPUT,    { .off = OFFSET(reinit_filters) },
             "reinit filtergraph on input parameter changes", "" },
-        { "filter_complex", HAS_ARG | OPT_EXPERT,                        { .func_arg = opt_filter_complex },
+        { "filter_complex", HAS_ARG | OPT_EXPERT,                        { .func_arg = opt_filter_complex_ex },
             "create a complex filtergraph", "graph_description" },
         { "filter_complex_threads", HAS_ARG | OPT_INT,                   { &filter_complex_nbthreads },
             "number of threads for -filter_complex" },
-        { "lavfi",          HAS_ARG | OPT_EXPERT,                        { .func_arg = opt_filter_complex },
+        { "lavfi",          HAS_ARG | OPT_EXPERT,                        { .func_arg = opt_filter_complex_ex },
             "create a complex filtergraph", "graph_description" },
-        { "filter_complex_script", HAS_ARG | OPT_EXPERT,                 { .func_arg = opt_filter_complex_script },
+        { "filter_complex_script", HAS_ARG | OPT_EXPERT,                 { .func_arg = opt_filter_complex_script_ex },
             "read complex filtergraph description from a file", "filename" },
         { "stats",          OPT_BOOL,                                    { &print_stats },
             "print progress report during encoding", },
         { "attach",         HAS_ARG | OPT_PERFILE | OPT_EXPERT |
-                            OPT_OUTPUT,                                  { .func_arg = opt_attach },
+                            OPT_OUTPUT,                                  { .func_arg = opt_attach_ex },
             "add an attachment to the output file", "filename" },
         { "dump_attachment", HAS_ARG | OPT_STRING | OPT_SPEC |
                              OPT_EXPERT | OPT_INPUT,                     { .off = OFFSET(dump_attachment) },
@@ -10964,7 +11312,7 @@ void FFmpegMedia::init_g_options(){
             "read and decode the streams to fill missing information with heuristics" },
 
         /* video options */
-        { "vframes",      OPT_VIDEO | HAS_ARG  | OPT_PERFILE | OPT_OUTPUT,           { .func_arg = opt_video_frames },
+        { "vframes",      OPT_VIDEO | HAS_ARG  | OPT_PERFILE | OPT_OUTPUT,           { .func_arg = opt_video_frames_ex },
             "set the number of video frames to output", "number" },
         { "r",            OPT_VIDEO | HAS_ARG  | OPT_STRING | OPT_SPEC |
                           OPT_INPUT | OPT_OUTPUT,                                    { .off = OFFSET(frame_rates) },
@@ -10988,13 +11336,13 @@ void FFmpegMedia::init_g_options(){
                           OPT_OUTPUT,                                                { .off = OFFSET(rc_overrides) },
             "rate control override for specific intervals", "override" },
         { "vcodec",       OPT_VIDEO | HAS_ARG  | OPT_PERFILE | OPT_INPUT |
-                          OPT_OUTPUT,                                                { .func_arg = opt_video_codec },
+                          OPT_OUTPUT,                                                { .func_arg = opt_video_codec_ex },
             "force video codec ('copy' to copy stream)", "codec" },
-        { "sameq",        OPT_VIDEO | OPT_EXPERT ,                                   { .func_arg = opt_sameq },
+        { "sameq",        OPT_VIDEO | OPT_EXPERT ,                                   { .func_arg = opt_sameq_ex },
             "Removed" },
-        { "same_quant",   OPT_VIDEO | OPT_EXPERT ,                                   { .func_arg = opt_sameq },
+        { "same_quant",   OPT_VIDEO | OPT_EXPERT ,                                   { .func_arg = opt_sameq_ex },
             "Removed" },
-        { "timecode",     OPT_VIDEO | HAS_ARG | OPT_PERFILE | OPT_OUTPUT,            { .func_arg = opt_timecode },
+        { "timecode",     OPT_VIDEO | HAS_ARG | OPT_PERFILE | OPT_OUTPUT,            { .func_arg = opt_timecode_ex },
             "set initial TimeCode value.", "hh:mm:ss[:;.]ff" },
         { "pass",         OPT_VIDEO | HAS_ARG | OPT_SPEC | OPT_INT | OPT_OUTPUT,     { .off = OFFSET(pass) },
             "select the pass number (1 to 3)", "n" },
@@ -11005,13 +11353,13 @@ void FFmpegMedia::init_g_options(){
             "this option is deprecated, use the yadif filter instead" },
         { "psnr",         OPT_VIDEO | OPT_BOOL | OPT_EXPERT,                         { &do_psnr },
             "calculate PSNR of compressed frames" },
-        { "vstats",       OPT_VIDEO | OPT_EXPERT ,                                   { .func_arg = opt_vstats },
+        { "vstats",       OPT_VIDEO | OPT_EXPERT ,                                   { .func_arg = opt_vstats_ex },
             "dump video coding statistics to file" },
-        { "vstats_file",  OPT_VIDEO | HAS_ARG | OPT_EXPERT ,                         { .func_arg = opt_vstats_file },
+        { "vstats_file",  OPT_VIDEO | HAS_ARG | OPT_EXPERT ,                         { .func_arg = opt_vstats_file_ex },
             "dump video coding statistics to file", "file" },
         { "vstats_version",  OPT_VIDEO | OPT_INT | HAS_ARG | OPT_EXPERT ,            { &vstats_version },
             "Version of the vstats format to use."},
-        { "vf",           OPT_VIDEO | HAS_ARG  | OPT_PERFILE | OPT_OUTPUT,           { .func_arg = opt_video_filters },
+        { "vf",           OPT_VIDEO | HAS_ARG  | OPT_PERFILE | OPT_OUTPUT,           { .func_arg = opt_video_filters_ex },
             "set video filters", "filter_graph" },
         { "intra_matrix", OPT_VIDEO | HAS_ARG | OPT_EXPERT  | OPT_STRING | OPT_SPEC |
                           OPT_OUTPUT,                                                { .off = OFFSET(intra_matrices) },
@@ -11026,7 +11374,7 @@ void FFmpegMedia::init_g_options(){
                           OPT_INPUT | OPT_OUTPUT,                                    { .off = OFFSET(top_field_first) },
             "top=1/bottom=0/auto=-1 field first", "" },
         { "vtag",         OPT_VIDEO | HAS_ARG | OPT_EXPERT  | OPT_PERFILE |
-                          OPT_INPUT | OPT_OUTPUT,                                    { .func_arg = opt_old2new },
+                          OPT_INPUT | OPT_OUTPUT,                                    { .func_arg = opt_old2new_ex },
             "force video tag/fourcc", "fourcc/tag" },
         { "qphist",       OPT_VIDEO | OPT_BOOL | OPT_EXPERT ,                        { &qp_hist },
             "show QP histogram" },
@@ -11034,14 +11382,14 @@ void FFmpegMedia::init_g_options(){
                           OPT_OUTPUT,                                                { .off = OFFSET(force_fps) },
             "force the selected framerate, disable the best supported framerate selection" },
         { "streamid",     OPT_VIDEO | HAS_ARG | OPT_EXPERT | OPT_PERFILE |
-                          OPT_OUTPUT,                                                { .func_arg = opt_streamid },
+                          OPT_OUTPUT,                                                { .func_arg = opt_streamid_ex },
             "set the value of an outfile streamid", "streamIndex:value" },
         { "force_key_frames", OPT_VIDEO | OPT_STRING | HAS_ARG | OPT_EXPERT |
                               OPT_SPEC | OPT_OUTPUT,                                 { .off = OFFSET(forced_key_frames) },
             "force key frames at specified timestamps", "timestamps" },
-        { "ab",           OPT_VIDEO | HAS_ARG | OPT_PERFILE | OPT_OUTPUT,            { .func_arg = opt_bitrate },
+        { "ab",           OPT_VIDEO | HAS_ARG | OPT_PERFILE | OPT_OUTPUT,            { .func_arg = opt_bitrate_ex },
             "audio bitrate (please use -b:a)", "bitrate" },
-        { "b",            OPT_VIDEO | HAS_ARG | OPT_PERFILE | OPT_OUTPUT,            { .func_arg = opt_bitrate },
+        { "b",            OPT_VIDEO | HAS_ARG | OPT_PERFILE | OPT_OUTPUT,            { .func_arg = opt_bitrate_ex },
             "video bitrate (please use -b:v)", "bitrate" },
         { "hwaccel",          OPT_VIDEO | OPT_STRING | HAS_ARG | OPT_EXPERT |
                               OPT_SPEC | OPT_INPUT,                                  { .off = OFFSET(hwaccels) },
@@ -11055,16 +11403,16 @@ void FFmpegMedia::init_g_options(){
     #if CONFIG_VIDEOTOOLBOX
         { "videotoolbox_pixfmt", HAS_ARG | OPT_STRING | OPT_EXPERT, { &videotoolbox_pixfmt}, "" },
     #endif
-        { "hwaccels",         OPT_EXIT,                                              { .func_arg = show_hwaccels },
+        { "hwaccels",         OPT_EXIT,                                              { .func_arg = show_hwaccels_ex },
             "show available HW acceleration methods" },
         { "autorotate",       HAS_ARG | OPT_BOOL | OPT_SPEC |
                               OPT_EXPERT | OPT_INPUT,                                { .off = OFFSET(autorotate) },
             "automatically insert correct rotate filters" },
 
         /* audio options */
-        { "aframes",        OPT_AUDIO | HAS_ARG  | OPT_PERFILE | OPT_OUTPUT,           { .func_arg = opt_audio_frames },
+        { "aframes",        OPT_AUDIO | HAS_ARG  | OPT_PERFILE | OPT_OUTPUT,           { .func_arg = opt_audio_frames_ex },
             "set the number of audio frames to output", "number" },
-        { "aq",             OPT_AUDIO | HAS_ARG  | OPT_PERFILE | OPT_OUTPUT,           { .func_arg = opt_audio_qscale },
+        { "aq",             OPT_AUDIO | HAS_ARG  | OPT_PERFILE | OPT_OUTPUT,           { .func_arg = opt_audio_qscale_ex },
             "set audio quality (codec-specific)", "quality", },
         { "ar",             OPT_AUDIO | HAS_ARG  | OPT_INT | OPT_SPEC |
                             OPT_INPUT | OPT_OUTPUT,                                    { .off = OFFSET(audio_sample_rate) },
@@ -11075,10 +11423,10 @@ void FFmpegMedia::init_g_options(){
         { "an",             OPT_AUDIO | OPT_BOOL | OPT_OFFSET | OPT_INPUT | OPT_OUTPUT,{ .off = OFFSET(audio_disable) },
             "disable audio" },
         { "acodec",         OPT_AUDIO | HAS_ARG  | OPT_PERFILE |
-                            OPT_INPUT | OPT_OUTPUT,                                    { .func_arg = opt_audio_codec },
+                            OPT_INPUT | OPT_OUTPUT,                                    { .func_arg = opt_audio_codec_ex },
             "force audio codec ('copy' to copy stream)", "codec" },
         { "atag",           OPT_AUDIO | HAS_ARG  | OPT_EXPERT | OPT_PERFILE |
-                            OPT_OUTPUT,                                                { .func_arg = opt_old2new },
+                            OPT_OUTPUT,                                                { .func_arg = opt_old2new_ex },
             "force audio tag/fourcc", "fourcc/tag" },
         { "vol",            OPT_AUDIO | HAS_ARG  | OPT_INT,                            { &audio_volume },
             "change audio volume (256=normal)" , "volume" },
@@ -11086,9 +11434,9 @@ void FFmpegMedia::init_g_options(){
                             OPT_STRING | OPT_INPUT | OPT_OUTPUT,                       { .off = OFFSET(sample_fmts) },
             "set sample format", "format" },
         { "channel_layout", OPT_AUDIO | HAS_ARG  | OPT_EXPERT | OPT_PERFILE |
-                            OPT_INPUT | OPT_OUTPUT,                                    { .func_arg = opt_channel_layout },
+                            OPT_INPUT | OPT_OUTPUT,                                    { .func_arg = opt_channel_layout_ex },
             "set channel layout", "layout" },
-        { "af",             OPT_AUDIO | HAS_ARG  | OPT_PERFILE | OPT_OUTPUT,           { .func_arg = opt_audio_filters },
+        { "af",             OPT_AUDIO | HAS_ARG  | OPT_PERFILE | OPT_OUTPUT,           { .func_arg = opt_audio_filters_ex },
             "set audio filters", "filter_graph" },
         { "guess_layout_max", OPT_AUDIO | HAS_ARG | OPT_INT | OPT_SPEC | OPT_EXPERT | OPT_INPUT, { .off = OFFSET(guess_layout_max) },
           "set the maximum number of channels to try to guess the channel layout" },
@@ -11096,9 +11444,9 @@ void FFmpegMedia::init_g_options(){
         /* subtitle options */
         { "sn",     OPT_SUBTITLE | OPT_BOOL | OPT_OFFSET | OPT_INPUT | OPT_OUTPUT, { .off = OFFSET(subtitle_disable) },
             "disable subtitle" },
-        { "scodec", OPT_SUBTITLE | HAS_ARG  | OPT_PERFILE | OPT_INPUT | OPT_OUTPUT, { .func_arg = opt_subtitle_codec },
+        { "scodec", OPT_SUBTITLE | HAS_ARG  | OPT_PERFILE | OPT_INPUT | OPT_OUTPUT, { .func_arg = opt_subtitle_codec_ex },
             "force subtitle codec ('copy' to copy stream)", "codec" },
-        { "stag",   OPT_SUBTITLE | HAS_ARG  | OPT_EXPERT  | OPT_PERFILE | OPT_OUTPUT, { .func_arg = opt_old2new }
+        { "stag",   OPT_SUBTITLE | HAS_ARG  | OPT_EXPERT  | OPT_PERFILE | OPT_OUTPUT, { .func_arg = opt_old2new_ex }
             , "force subtitle tag/fourcc", "fourcc/tag" },
         { "fix_sub_duration", OPT_BOOL | OPT_EXPERT | OPT_SUBTITLE | OPT_SPEC | OPT_INPUT, { .off = OFFSET(fix_sub_duration) },
             "fix subtitles duration" },
@@ -11106,9 +11454,9 @@ void FFmpegMedia::init_g_options(){
             "set canvas size (WxH or abbreviation)", "size" },
 
         /* grab options */
-        { "vc", HAS_ARG | OPT_EXPERT | OPT_VIDEO, { .func_arg = opt_video_channel },
+        { "vc", HAS_ARG | OPT_EXPERT | OPT_VIDEO, { .func_arg = opt_video_channel_ex },
             "deprecated, use -channel", "channel" },
-        { "tvstd", HAS_ARG | OPT_EXPERT | OPT_VIDEO, { .func_arg = opt_video_standard },
+        { "tvstd", HAS_ARG | OPT_EXPERT | OPT_VIDEO, { .func_arg = opt_video_standard_ex },
             "deprecated, use -standard", "standard" },
         { "isync", OPT_BOOL | OPT_EXPERT, { &input_sync }, "this option is deprecated and does nothing", "" },
 
@@ -11117,7 +11465,7 @@ void FFmpegMedia::init_g_options(){
             "set the maximum demux-decode delay", "seconds" },
         { "muxpreload", OPT_FLOAT | HAS_ARG | OPT_EXPERT | OPT_OFFSET | OPT_OUTPUT, { .off = OFFSET(mux_preload) },
             "set the initial demux-decode delay", "seconds" },
-        { "sdp_file", HAS_ARG | OPT_EXPERT | OPT_OUTPUT, { .func_arg = opt_sdp_file },
+        { "sdp_file", HAS_ARG | OPT_EXPERT | OPT_OUTPUT, { .func_arg = opt_sdp_file_ex },
             "specify a file in which to print sdp information", "file" },
 
         { "time_base", HAS_ARG | OPT_STRING | OPT_EXPERT | OPT_SPEC | OPT_OUTPUT, { .off = OFFSET(time_bases) },
@@ -11130,25 +11478,25 @@ void FFmpegMedia::init_g_options(){
 
         { "bsf", HAS_ARG | OPT_STRING | OPT_SPEC | OPT_EXPERT | OPT_OUTPUT, { .off = OFFSET(bitstream_filters) },
             "A comma-separated list of bitstream filters", "bitstream_filters" },
-        { "absf", HAS_ARG | OPT_AUDIO | OPT_EXPERT| OPT_PERFILE | OPT_OUTPUT, { .func_arg = opt_old2new },
+        { "absf", HAS_ARG | OPT_AUDIO | OPT_EXPERT| OPT_PERFILE | OPT_OUTPUT, { .func_arg = opt_old2new_ex },
             "deprecated", "audio bitstream_filters" },
-        { "vbsf", OPT_VIDEO | HAS_ARG | OPT_EXPERT| OPT_PERFILE | OPT_OUTPUT, { .func_arg = opt_old2new },
+        { "vbsf", OPT_VIDEO | HAS_ARG | OPT_EXPERT| OPT_PERFILE | OPT_OUTPUT, { .func_arg = opt_old2new_ex },
             "deprecated", "video bitstream_filters" },
 
-        { "apre", HAS_ARG | OPT_AUDIO | OPT_EXPERT| OPT_PERFILE | OPT_OUTPUT,    { .func_arg = opt_preset },
+        { "apre", HAS_ARG | OPT_AUDIO | OPT_EXPERT| OPT_PERFILE | OPT_OUTPUT,    { .func_arg = opt_preset_ex },
             "set the audio options to the indicated preset", "preset" },
-        { "vpre", OPT_VIDEO | HAS_ARG | OPT_EXPERT| OPT_PERFILE | OPT_OUTPUT,    { .func_arg = opt_preset },
+        { "vpre", OPT_VIDEO | HAS_ARG | OPT_EXPERT| OPT_PERFILE | OPT_OUTPUT,    { .func_arg = opt_preset_ex },
             "set the video options to the indicated preset", "preset" },
-        { "spre", HAS_ARG | OPT_SUBTITLE | OPT_EXPERT| OPT_PERFILE | OPT_OUTPUT, { .func_arg = opt_preset },
+        { "spre", HAS_ARG | OPT_SUBTITLE | OPT_EXPERT| OPT_PERFILE | OPT_OUTPUT, { .func_arg = opt_preset_ex },
             "set the subtitle options to the indicated preset", "preset" },
-        { "fpre", HAS_ARG | OPT_EXPERT| OPT_PERFILE | OPT_OUTPUT,                { .func_arg = opt_preset },
+        { "fpre", HAS_ARG | OPT_EXPERT| OPT_PERFILE | OPT_OUTPUT,                { .func_arg = opt_preset_ex },
             "set options from indicated preset file", "filename" },
 
         { "max_muxing_queue_size", HAS_ARG | OPT_INT | OPT_SPEC | OPT_EXPERT | OPT_OUTPUT, { .off = OFFSET(max_muxing_queue_size) },
             "maximum number of packets that can be buffered while waiting for all streams to initialize", "packets" },
 
         /* data codec support */
-        { "dcodec", HAS_ARG | OPT_DATA | OPT_PERFILE | OPT_EXPERT | OPT_INPUT | OPT_OUTPUT, { .func_arg = opt_data_codec },
+        { "dcodec", HAS_ARG | OPT_DATA | OPT_PERFILE | OPT_EXPERT | OPT_INPUT | OPT_OUTPUT, { .func_arg = opt_data_codec_ex },
             "force data codec ('copy' to copy stream)", "codec" },
         { "dn", OPT_BOOL | OPT_VIDEO | OPT_OFFSET | OPT_INPUT | OPT_OUTPUT, { .off = OFFSET(data_disable) },
             "disable data" },
@@ -11163,15 +11511,27 @@ void FFmpegMedia::init_g_options(){
             "set QSV hardware device (DirectX adapter index, DRM path or X11 display name)", "device"},
     #endif
 
-        { "init_hw_device", HAS_ARG | OPT_EXPERT, { .func_arg = opt_init_hw_device },
+        { "init_hw_device", HAS_ARG | OPT_EXPERT, { .func_arg = opt_init_hw_device_ex },
             "initialise hardware device", "args" },
-        { "filter_hw_device", HAS_ARG | OPT_EXPERT, { .func_arg = opt_filter_hw_device },
+        { "filter_hw_device", HAS_ARG | OPT_EXPERT, { .func_arg = opt_filter_hw_device_ex },
             "set hardware device used when filtering", "device" },
 
         { NULL, },
     };
 
+    //const OptionDef options = tmpoptions;
+    int arrLen = sizeof(tmpoptions)/sizeof(tmpoptions[0]);
+    options = new OptionDef[arrLen];
+    if(!options){
+        av_log(NULL, AV_LOG_FATAL, "init_g_options failed, return\n");
+        return;
+    }
 
+    for(int i = 0; i < arrLen; i++){
+        options[i] = tmpoptions[i];
+    }
+
+    av_log(NULL, AV_LOG_DEBUG, "init_g_options successful\n");
 
 #else
     #define OFFSET(x) offsetof(OptionsContext, x)
@@ -14874,6 +15234,39 @@ void FFmpegMedia::uninit_parse_context(OptionParseContext *octx)
     av_freep(&octx->global_opts.opts);
 
     uninit_opts();
+}
+
+int FFmpegMedia::parse_option(void *optctx, const char *opt, const char *arg,
+                 const OptionDef *options)
+{
+    const OptionDef *po;
+    int ret;
+
+    po = find_option(options, opt);
+    if (!po->name && opt[0] == 'n' && opt[1] == 'o') {
+        /* handle 'no' bool option */
+        po = find_option(options, opt + 2);
+        if ((po->name && (po->flags & OPT_BOOL)))
+            arg = "0";
+    } else if (po->flags & OPT_BOOL)
+        arg = "1";
+
+    if (!po->name)
+        po = find_option(options, "default");
+    if (!po->name) {
+        av_log(NULL, AV_LOG_ERROR, "Unrecognized option '%s'\n", opt);
+        return AVERROR(EINVAL);
+    }
+    if (po->flags & HAS_ARG && !arg) {
+        av_log(NULL, AV_LOG_ERROR, "Missing argument for option '%s'\n", opt);
+        return AVERROR(EINVAL);
+    }
+
+    ret = write_option(optctx, po, opt, arg);
+    if (ret < 0)
+        return ret;
+
+    return !!(po->flags & HAS_ARG);
 }
 
 int FFmpegMedia::ffmpeg_parse_options(int argc, char **argv){
