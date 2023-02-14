@@ -752,6 +752,7 @@ static const OptionGroupDef groups[] = {
 //typedef struct FFmpegMedia{
 class FFmpegMedia{
 public:
+    friend OptionDef;
     FFmpegMedia();
     virtual ~FFmpegMedia();
 
@@ -852,6 +853,48 @@ public:
     int copy_chapters(InputFile *ifile, OutputFile *ofile, int copy_metadata);
     void tyy_print_AVDirnary(AVDictionary *d);
 
+#if 0
+    int opt_map(void *optctx, const char *opt, const char *arg);
+    int opt_map_channel(void *optctx, const char *opt, const char *arg);
+    int opt_recording_timestamp(void *optctx, const char *opt, const char *arg);
+    int opt_data_frames(void *optctx, const char *opt, const char *arg);
+    int opt_progress(void *optctx, const char *opt, const char *arg);
+    int opt_target(void *optctx, const char *opt, const char *arg);
+    int opt_audio_codec(void *optctx, const char *opt, const char *arg);
+    int opt_video_channel(void *optctx, const char *opt, const char *arg);
+    int opt_video_standard(void *optctx, const char *opt, const char *arg);
+    int opt_video_codec(void *optctx, const char *opt, const char *arg);
+    int opt_subtitle_codec(void *optctx, const char *opt, const char *arg);
+    int opt_data_codec(void *optctx, const char *opt, const char *arg);
+    int opt_vsync(void *optctx, const char *opt, const char *arg);
+    int opt_abort_on(void *optctx, const char *opt, const char *arg);
+    int opt_qscale(void *optctx, const char *opt, const char *arg);
+    int opt_profile(void *optctx, const char *opt, const char *arg);
+    int opt_video_filters(void *optctx, const char *opt, const char *arg);
+    int opt_audio_filters(void *optctx, const char *opt, const char *arg);
+    int opt_filter_complex(void *optctx, const char *opt, const char *arg);
+    int opt_filter_complex_script(void *optctx, const char *opt, const char *arg);
+    int opt_attach(void *optctx, const char *opt, const char *arg);
+    int opt_video_frames(void *optctx, const char *opt, const char *arg);
+    int opt_audio_frames(void *optctx, const char *opt, const char *arg);
+    //int opt_data_frames(void *optctx, const char *opt, const char *arg);
+    int opt_sameq(void *optctx, const char *opt, const char *arg);
+    int opt_timecode(void *optctx, const char *opt, const char *arg);
+    int opt_vstats_file(void *optctx, const char *opt, const char *arg);
+    int opt_vstats(void *optctx, const char *opt, const char *arg);
+    int opt_old2new(void *optctx, const char *opt, const char *arg);
+    int opt_bitrate(void *optctx, const char *opt, const char *arg);
+    int opt_streamid(void *optctx, const char *opt, const char *arg);
+    int show_hwaccels(void *optctx, const char *opt, const char *arg);
+    int opt_audio_qscale(void *optctx, const char *opt, const char *arg);
+    int opt_default_new(OptionsContext *o, const char *opt, const char *arg);
+    int opt_channel_layout(void *optctx, const char *opt, const char *arg);
+    int opt_sdp_file(void *optctx, const char *opt, const char *arg);
+    int opt_preset(void *optctx, const char *opt, const char *arg);
+    int opt_init_hw_device(void *optctx, const char *opt, const char *arg);
+    int opt_filter_hw_device(void *optctx, const char *opt, const char *arg);
+#endif
+
     // ffmpeg_filters.c
     int init_simple_filtergraph(InputStream *ist, OutputStream *ost);
     void check_filter_outputs(void);
@@ -888,6 +931,8 @@ public:
     int hw_device_setup_for_decode(InputStream *ist);
     int hw_device_setup_for_encode(OutputStream *ost);
     HWDevice *hw_device_get_by_name(const char *name);
+    void hw_device_free_all(void);
+    int hw_device_init_from_string(const char *arg, HWDevice **dev_out);
 
 
     // tyy func
@@ -966,16 +1011,63 @@ public:
 
     int check_recording_time(OutputStream *ost);
     void update_benchmark(const char *fmt, ...);
-    char* av_err2str_ex(int errnum, char *str);
-    char* av_ts2str_ex(int errnum, char *str);
-    char* av_ts2timestr_ex(char *str, int64_t ts, AVRational *tb);
+    static char* av_err2str_ex(char *buf, int errnum);
+    static char* av_ts2str_ex(char *buf, int64_t ts);
+    static char* av_ts2timestr_ex(char *buf, int64_t ts, AVRational *tb);
+    static char* av_ts2timestr_ex(char *buf, int64_t ts, AVRational tb);
+    void close_all_output_streams(OutputStream *ost, OSTFinished this_stream, OSTFinished others);
+    void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int unqueue);
+    void output_packet(OutputFile *of, AVPacket *pkt,
+                              OutputStream *ost, int eof);
+    double psnr(double d);
+    void do_video_stats(OutputStream *ost, int frame_size);
     void do_video_out(OutputFile *of,
                              OutputStream *ost,
                              AVFrame *next_picture,
                              double sync_ipts);
+    void do_audio_out(OutputFile *of, OutputStream *ost,
+                             AVFrame *frame);
     int reap_filters(int flush);
     int transcode_from_filter(FilterGraph *graph, InputStream **best_ist);
+    int get_input_packet(InputFile *f, AVPacket *pkt);
+    int decode(AVCodecContext *avctx, AVFrame *frame, int *got_frame, AVPacket *pkt);
+    void check_decode_result(InputStream *ist, int *got_output, int ret);
+    int ifilter_parameters_from_frame(InputFilter *ifilter, const AVFrame *frame);
+    int ifilter_send_frame(InputFilter *ifilter, AVFrame *frame);
+    int send_frame_to_filters(InputStream *ist, AVFrame *decoded_frame);
+    int decode_audio(InputStream *ist, AVPacket *pkt, int *got_output,
+                            int *decode_failed);
+    int decode_video(InputStream *ist, AVPacket *pkt, int *got_output, int64_t *duration_pts, int eof,
+                            int *decode_failed);
+    void sub2video_flush(InputStream *ist);
+    int check_output_constraints(InputStream *ist, OutputStream *ost);
+    void do_subtitle_out(OutputFile *of,
+                                OutputStream *ost,
+                                AVSubtitle *sub);
+    int transcode_subtitles(InputStream *ist, AVPacket *pkt, int *got_output,
+                                   int *decode_failed);
+    void ifilter_parameters_from_codecpar(InputFilter *ifilter, AVCodecParameters *par);
+    int ifilter_send_eof(InputFilter *ifilter, int64_t pts);
+    int send_filter_eof(InputStream *ist);
+    void do_streamcopy(InputStream *ist, OutputStream *ost, const AVPacket *pkt);
+    int process_input_packet(InputStream *ist, const AVPacket *pkt, int no_eof);
+    AVRational duration_max(int64_t tmp, int64_t *duration, AVRational tmp_time_base,
+                                   AVRational time_base);
+    int seek_to_start(InputFile *ifile, AVFormatContext *is);
+    void finish_output_stream(OutputStream *ost);
+    void report_new_stream(int input_index, AVPacket *pkt);
+    void sub2video_heartbeat(InputStream *ist, int64_t pts);
+    int process_input(int file_index);
     int transcode_step(void);
+
+    void print_final_stats(int64_t total_size);
+    void print_report(int is_last_report, int64_t timer_start, int64_t cur_time);
+
+    void flush_encoders(void);
+    void term_exit_sigsafe(void);
+    void term_exit(void);
+    int64_t getmaxrss(void);
+    void ffmpeg_cleanup(int ret);
 
     int transcode(void);
 
@@ -1026,7 +1118,7 @@ public:
     //int frame_bits_per_raw_sample;
     AVIOContext *progress_avio;
     //float max_error_rate;
-    char *videotoolbox_pixfmt;
+    char *videotoolbox_pixfmt = NULL;
 
     //int filter_nbthreads;                // -filter_threads选项,默认0,非复杂过滤器线程数.
     //int filter_complex_nbthreads;        // -filter_complex_threads选项,默认0,复杂过滤器线程数.
@@ -1037,11 +1129,11 @@ public:
     OptionDef options[178];
     //OptionDef *options = NULL;
     //const HWAccel hwaccels[];
-    AVBufferRef *hw_device_ctx;
+    AVBufferRef *hw_device_ctx = NULL;
     #if CONFIG_QSV
     char *qsv_device;
     #endif
-    HWDevice *filter_hw_device;          // -filter_hw_device选项
+    HWDevice *filter_hw_device = NULL;          // -filter_hw_device选项
 
 
 public:
@@ -1071,18 +1163,22 @@ public:
     //const char program_name[];
     const int program_birth_year;
     AVCodecContext *avcodec_opts[AVMEDIA_TYPE_NB];
-    AVFormatContext *avformat_opts;
-    AVDictionary *sws_dict;
-    AVDictionary *swr_opts;
-    AVDictionary *format_opts, *codec_opts, *resample_opts;
+    AVFormatContext *avformat_opts = NULL;
+    AVDictionary *sws_dict = NULL;
+    AVDictionary *swr_opts = NULL;
+    AVDictionary *format_opts = NULL, *codec_opts = NULL, *resample_opts = NULL;
     int hide_banner;
     //atomic_int transcode_init_done = ATOMIC_VAR_INIT(0);
     //std::atomic<int> transcode_init_done;
 
+    FILE *vstats_file = NULL;
+
+    uint8_t *subtitle_out = NULL;
+
     // ffmpeg_opt.c global var
     //float max_error_rate  = 2.0/3;
-    char *vstats_filename;
-    char *sdp_filename;
+    char *vstats_filename = NULL;
+    char *sdp_filename = NULL;
 
     float audio_drift_threshold = 0.1;
     float dts_delta_threshold   = 10;

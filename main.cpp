@@ -11,10 +11,16 @@ extern "C"{
 }
 #endif
 
-int main()
+int main(int argc, char **argv)
 {
-    string t = "i hate you";
-    cout << "Hello World!" << endl;
-    cout << t << endl;
+    cout << "Hello World!1" << endl;
+
+    FFmpegMedia tyy;
+    tyy.argc = argc;
+    tyy.argv = argv;
+    tyy.start();
+
+    cout << "Hello World!2" << endl;
+
     return 0;
 }
