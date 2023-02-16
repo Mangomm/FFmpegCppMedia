@@ -11,7 +11,8 @@ HEADERS += \
     cmdutils.h \
     config.h \
     ffmpeg.h \
-    globalheader.h
+    globalheader.h \
+    version.h
 
 
 win32 {

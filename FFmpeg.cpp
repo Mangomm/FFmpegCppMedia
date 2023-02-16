@@ -15341,3 +15341,11 @@ fail:
     }
     return ret;
 }
+
+void FFmpegMedia::fm_set_input_filename(const char* filename){
+    _input_filename = filename;
+}
+
+void FFmpegMedia::fm_set_output_filename(const char* filename){
+    _output_filename = filename;
+}

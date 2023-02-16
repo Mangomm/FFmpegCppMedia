@@ -21,7 +21,7 @@
 
 
 #if defined(__MINGW64__)
-// fixme: 解决qt mingw编译器中pthread.h 与 ffmpeg定义的pthread_t等结构体和函数重定义的问题
+// fixme: windows环境，解决qt mingw编译器中pthread.h 与 ffmpeg定义的pthread_t等结构体和函数重定义的问题
 #define WIN_PTHREADS_H
 #define _GLIBCXX_GCC_GTHR_POSIX_H
 #include <string>
@@ -1247,6 +1247,13 @@ public:
     // tyy gloabl var
     int argc = 0;
     char **argv = NULL;
+
+    // tyy code
+public:
+    void fm_set_input_filename(const char* filename);
+    void fm_set_output_filename(const char* filename);
+
+private:
     std::string _input_filename;
     std::string _output_filename;
 };
