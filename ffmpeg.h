@@ -20,79 +20,43 @@
  */
 
 
-//typedef struct pthread_t1{
-//    void *handle;
-//    void *(*func)(void* arg);
-//    void *arg;
-//    void *ret;
-//}pthread_t1;
-//using pthread_t = struct pthread_t;
-
-#include <atomic>
-#if true
-extern "C"{
-#include "config.h"
-
-#include <stdint.h>
-#include <stdio.h>
-#include <signal.h>
-
-#include "cmdutils.h"
-
-#include "libavformat/avformat.h"
-#include "libavformat/avio.h"
-
-#include "libavcodec/avcodec.h"
-
-#include "libavfilter/avfilter.h"
-
-#include "libavutil/avutil.h"
-#include "libavutil/dict.h"
-#include "libavutil/eval.h"
-#include "libavutil/fifo.h"
-#include "libavutil/hwcontext.h"
-#include "libavutil/pixfmt.h"
-#include "libavutil/rational.h"
-//#include "libavutil/thread.h"
-
-#include "libavutil/threadmessage.h"
-
-#include "libswresample/swresample.h"
-}
-#else
-#include "config.h"
-
-#include <stdint.h>
-#include <stdio.h>
-#include <signal.h>
-
-#include "cmdutils.h"
-
-#include "libavformat/avformat.h"
-#include "libavformat/avio.h"
-
-#include "libavcodec/avcodec.h"
-
-#include "libavfilter/avfilter.h"
-
-#include "libavutil/avutil.h"
-#include "libavutil/dict.h"
-#include "libavutil/eval.h"
-#include "libavutil/fifo.h"
-#include "libavutil/hwcontext.h"
-#include "libavutil/pixfmt.h"
-#include "libavutil/rational.h"
-//#include "libavutil/thread.h"
-#include "libavutil/threadmessage.h"
-
-#include "libswresample/swresample.h"
+#if defined(__MINGW64__)
+// fixme: 解决qt mingw编译器中pthread.h 与 ffmpeg定义的pthread_t等结构体和函数重定义的问题
+#define WIN_PTHREADS_H
+#define _GLIBCXX_GCC_GTHR_POSIX_H
+#include <string>
 #endif
 
+#include <atomic>
 
 extern "C"{
-//#include "compat/w32pthreads.h"
-//#include <stdatomic.h>//与C++会冲突
+#include "config.h"
 
+#include <stdint.h>
+#include <stdio.h>
+#include <signal.h>
+
+#include "cmdutils.h"
+
+#include "libavformat/avformat.h"
+#include "libavformat/avio.h"
+
+#include "libavcodec/avcodec.h"
+
+#include "libavfilter/avfilter.h"
+
+#include "libavutil/avutil.h"
+#include "libavutil/dict.h"
+#include "libavutil/eval.h"
+#include "libavutil/fifo.h"
+#include "libavutil/hwcontext.h"
+#include "libavutil/pixfmt.h"
+#include "libavutil/rational.h"
+//#include "libavutil/thread.h"
+
+#include "libavutil/threadmessage.h"
+
+#include "libswresample/swresample.h"
 }
 
 
@@ -107,10 +71,10 @@ extern "C"{
 #define MAX_STREAMS 1024    /* arbitrary sanity check value */
 
 #define mydebug av_log
-#define TYYCODE_TIMESTAMP_DEMUXER   // 用于debug解复用的时间戳
-#define TYYCODE_TIMESTAMP_DECODE
-#define TYYCODE_TIMESTAMP_ENCODER
-#define TYYCODE_TIMESTAMP_MUXER
+//#define TYYCODE_TIMESTAMP_DEMUXER   // 用于debug解复用的时间戳
+//#define TYYCODE_TIMESTAMP_DECODE
+//#define TYYCODE_TIMESTAMP_ENCODER
+//#define TYYCODE_TIMESTAMP_MUXER
 
 //ffmpeg_opt.c
 /**
@@ -1283,6 +1247,8 @@ public:
     // tyy gloabl var
     int argc = 0;
     char **argv = NULL;
+    std::string _input_filename;
+    std::string _output_filename;
 };
 //extern const OptionDef options[];
 // 硬件的后续完善

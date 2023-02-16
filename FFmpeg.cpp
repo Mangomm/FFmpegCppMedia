@@ -12074,7 +12074,15 @@ int FFmpegMedia::open_files(OptionGroupList *l, const char *inout,
 
         av_log(NULL, AV_LOG_DEBUG, "Opening an %s file: %s.\n", inout, g->arg);
         //ret = open_file(&o, g->arg);
-        ret = open_file((void*)this, &o, g->arg);
+        std::string lowstr = inout;
+        if(strlwr((char*)lowstr.c_str()) == std::string("input")){
+            _input_filename = g->arg;
+            ret = open_file((void*)this, &o, _input_filename.c_str());
+        }else{
+            ret = open_file((void*)this, &o, _output_filename.c_str());
+        }
+
+//        ret = open_file((void*)this, &o, g->arg);
         uninit_options(&o);
         if (ret < 0) {
             av_log(NULL, AV_LOG_ERROR, "Error opening %s file %s.\n",
