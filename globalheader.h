@@ -1,7 +1,7 @@
 #ifndef GLOBALHEADER_H
 #define GLOBALHEADER_H
 
-namespace TYYNM {
+namespace HCMFFmpegMedia {
 
 //#define _WIN32_WINNT 0x0600
 ////#include <synchapi.h>

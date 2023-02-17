@@ -2,11 +2,13 @@
 #define VERSION_H
 
 #include <string>
+
+namespace HCMFFmpegMedia {
 static std::string g_version_str;
 
 #define FFMPEG_MEDIA_VERSION_MAJOR 0
 #define FFMPEG_MEDIA_VERSION_MINOR 0
-#define FFMPEG_MEDIA_VERSION_REVISION 2
+#define FFMPEG_MEDIA_VERSION_REVISION 3
 
 #define FFMPEG_MEDIA_VERSION_STATUS "HCMFFmpegMedia"
 
@@ -19,7 +21,7 @@ static std::string g_version_str;
     FFMPEG_MEDIA_VERSION_STATUS
 
 
-//宽字符表示
+// 宽字符表示
 #define FFMPEG_MEDIA_AUX_WSTR_EXP(__A) L## #__A
 #define FFMPEG_MEDIA_AUX_WSTR(__A) FFMPEG_MEDIA_AUX_WSTR_EXP(__A)
 #define FFMPEG_MEDIA_VERSION_WSTR FFMPEG_MEDIA_AUX_WSTR(FFMPEG_MEDIA_VERSION_MAJOR)"." \
@@ -33,5 +35,6 @@ std::string fm_get_version(){
     return g_version_str;
 }
 
+}
 
 #endif // VERSION_H

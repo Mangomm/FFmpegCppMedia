@@ -5,13 +5,17 @@ CONFIG -= qt
 
 SOURCES += \
         ffmpeg.cpp \
-        main.cpp
+        main.cpp \
+        thread_wrapper.cpp
 
 HEADERS += \
     cmdutils.h \
     config.h \
     ffmpeg.h \
     globalheader.h \
+    msgdef.h \
+    msgqueue.hpp \
+    thread_wrapper.h \
     version.h
 
 

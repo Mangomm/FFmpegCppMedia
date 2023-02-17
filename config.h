@@ -326,7 +326,9 @@
 #define HAVE_VAAPI_DRM 0
 #define HAVE_VAAPI_X11 0
 #define HAVE_VDPAU_X11 0
-#define HAVE_PTHREADS 0
+// 当编译器支持pthread.h头文件时，HAVE_PTHREADS要置为1， 否则会与ffmpeg的libavutil/thread.h的结构体重定义
+//#define HAVE_PTHREADS 0
+#define HAVE_PTHREADS 1
 #define HAVE_OS2THREADS 0
 #define HAVE_W32THREADS 1
 #define HAVE_AS_ARCH_DIRECTIVE 0

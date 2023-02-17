@@ -19,15 +19,16 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-
 #if defined(__MINGW64__)
-// fixme: windows环境，解决qt mingw编译器中pthread.h 与 ffmpeg定义的pthread_t等结构体和函数重定义的问题
-#define WIN_PTHREADS_H
-#define _GLIBCXX_GCC_GTHR_POSIX_H
-#include <string>
+// 需要对应修改config.h的HAVE_PTHREADS变量
+#include <pthread.h>
 #endif
 
+#include <string>
 #include <atomic>
+#include "msgqueue.hpp"
+#include "msgdef.h"
+#include "thread_wrapper.h"
 
 extern "C"{
 #include "config.h"
@@ -53,12 +54,10 @@ extern "C"{
 #include "libavutil/pixfmt.h"
 #include "libavutil/rational.h"
 //#include "libavutil/thread.h"
-
 #include "libavutil/threadmessage.h"
 
 #include "libswresample/swresample.h"
 }
-
 
 
 #define VSYNC_AUTO       -1
@@ -486,8 +485,10 @@ typedef struct InputStream {
     int got_output;                 // =1:标记该输入流至少已经成功解码一个pkt. see process_input_packet()
 } InputStream;
 
-//typedef struct pthread_t pthread_t;
+#ifndef TYY_POINT_THREAD
+#else
 typedef pthread_t pthread_t;
+#endif
 // 封装输入文件相关信息的结构体
 typedef struct InputFile {
     AVFormatContext *ctx; // 输入文件的ctx
@@ -518,10 +519,11 @@ typedef struct InputFile {
 #if HAVE_THREADS
     AVThreadMessageQueue *in_thread_queue;      // 该输入文件的线程消息队列.
                                                 // 多个输入文件时,会开启多个线程,每个线程通过av_read_frame读到的pkt会存放到该队列
-
-    //pthread_t thread;           /* thread reading from this file */
-    pthread_t *thread;            // tyycode ，记得回收
-//    pthread_t1 *thread;           /* thread reading from this file */
+#ifndef TYY_POINT_THREAD
+    pthread_t thread;           /* thread reading from this file */
+#else
+    pthread_t *thread;          // tyycode
+#endif
     int non_blocking;           /* reading packets from the thread should not block(从线程读取数据包不应该被阻塞) */
                                 // 存在多个输入文件即多线程读取时,av_read_frame是否阻塞,0=阻塞,1=非阻塞
 
@@ -716,28 +718,11 @@ static const OptionGroupDef groups[] = {
 //typedef struct FFmpegMedia{
 class FFmpegMedia{
 public:
-    friend OptionDef;
     FFmpegMedia();
     virtual ~FFmpegMedia();
 
 private:
     void init_dynload();
-
-public:
-    void ffmpeg_init();
-//    int ffmpeg_open_input();
-//    int ffmpeg_open_output();
-
-//    static int open_input_file(OptionsContext *o, const char *filename);
-//    int open_input_file(const char *filename);
-
-//    static int open_files(OptionGroupList *l, const char *inout,
-//                          int (*open_file)(OptionsContext*, const char*));
-//    int open_files(OptionGroupList *l, const char *inout,
-//                          int (*open_file)(const char*));
-
-
-    int ffmpeg_transcode();
 
 public:
     BenchmarkTimeStamps get_benchmark_time_stamps(void);
@@ -1254,7 +1239,10 @@ public:
     void fm_set_output_filename(const char* filename);
 
 private:
+    // 输入相关参数
     std::string _input_filename;
+
+    // 输出相关参数
     std::string _output_filename;
 };
 //extern const OptionDef options[];
