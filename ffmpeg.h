@@ -59,6 +59,7 @@ extern "C"{
 #include "libswresample/swresample.h"
 }
 
+namespace HCMFFmpegMedia {
 
 #define VSYNC_AUTO       -1
 #define VSYNC_PASSTHROUGH 0         // 透传?
@@ -714,15 +715,19 @@ static const OptionGroupDef groups[] = {
 
 
 #if 1
-
-//typedef struct FFmpegMedia{
-class FFmpegMedia{
+class FFmpegMedia : public ThreadWrapper{
 public:
     FFmpegMedia();
+    FFmpegMedia(Queue<FMMessage*> *msgqueue);
     virtual ~FFmpegMedia();
 
 private:
     void init_dynload();
+
+public:
+    int start();
+    int start_async();
+    virtual void loop();
 
 public:
     BenchmarkTimeStamps get_benchmark_time_stamps(void);
@@ -731,13 +736,13 @@ public:
 public:
     // cmdutil.h func
     void init_opts();
-    void finish_group(OptionParseContext *octx, int group_idx,
+    int finish_group(OptionParseContext *octx, int group_idx,
                              const char *arg);
     void *grow_array(void *array, int elem_size, int *size, int new_size);
     int match_group_separator(const OptionGroupDef *groups, int nb_groups,
                                      const char *opt);
     const OptionDef *find_option(const OptionDef *po, const char *name);
-    void add_opt(OptionParseContext *octx, const OptionDef *opt,
+    int add_opt(OptionParseContext *octx, const OptionDef *opt,
                         const char *key, const char *val);
     int opt_default(void *optctx, const char *opt, const char *arg);
     const AVOption *opt_find(void *obj, const char *name, const char *unit,
@@ -769,6 +774,7 @@ public:
     // ffmpeg_opt.c
     void init_options(OptionsContext *o);
     void uninit_options(OptionsContext *o);
+    int init_complex_filters(void);
     int open_input_file(OptionsContext *o, const char *filename);
     static int open_input_file_ex(void* arg, OptionsContext *o, const char *filename);
 //    int open_files(OptionGroupList *l, const char *inout,
@@ -776,26 +782,27 @@ public:
 
     AVDictionary *strip_specifiers(AVDictionary *dict);
     AVCodec *choose_decoder(OptionsContext *o, AVFormatContext *s, AVStream *st);
-    void dump_attachment(AVStream *st, const char *filename);
-    void assert_file_overwrite(const char *filename);
+    int /*void*/ dump_attachment(AVStream *st, const char *filename);
+    int /*void*/ assert_file_overwrite(const char *filename);
     int open_files(OptionGroupList *l, const char *inout,
                           int (*open_file)(void*, OptionsContext*, const char*));
-    void  add_input_streams(OptionsContext *o, AVFormatContext *ic);
+    int /*void*/  add_input_streams(OptionsContext *o, AVFormatContext *ic);
 
     int open_output_file(OptionsContext *o, const char *filename);
     static int open_output_file_ex(void* arg, OptionsContext *o, const char *filename);
-    void init_output_filter(OutputFilter *ofilter, OptionsContext *o,
+    int /*void*/ init_output_filter(OutputFilter *ofilter, OptionsContext *o,
                                    AVFormatContext *oc);
     OutputStream *new_video_stream(OptionsContext *o, AVFormatContext *oc, int source_index);
     OutputStream *new_output_stream(OptionsContext *o, AVFormatContext *oc, enum AVMediaType type, int source_index);
+    void free_output_stream(OutputStream *ost);
     int choose_encoder(OptionsContext *o, AVFormatContext *s, OutputStream *ost);
     int get_preset_file_2(const char *preset_name, const char *codec_name, AVIOContext **s);
     uint8_t *get_line(AVIOContext *s);
-    void parse_matrix_coeffs(uint16_t *dest, const char *str);
+    int /*void*/ parse_matrix_coeffs(uint16_t *dest, const char *str);
     uint8_t *read_file(const char *filename);
     char *get_ost_filters(OptionsContext *o, AVFormatContext *oc,
                                  OutputStream *ost);
-    void check_streamcopy_filters(OptionsContext *o, AVFormatContext *oc,
+    int /*void*/ check_streamcopy_filters(OptionsContext *o, AVFormatContext *oc,
                                          const OutputStream *ost, enum AVMediaType type);
 
     OutputStream *new_audio_stream(OptionsContext *o, AVFormatContext *oc, int source_index);
@@ -804,7 +811,7 @@ public:
     OutputStream *new_attachment_stream(OptionsContext *o, AVFormatContext *oc, int source_index);
     OutputStream *new_unknown_stream(OptionsContext *o, AVFormatContext *oc, int source_index);
 
-    void parse_meta_type(char *arg, char *type, int *index, const char **stream_spec);
+    int /*void*/ parse_meta_type(char *arg, char *type, int *index, const char **stream_spec);
     int copy_metadata(char *outspec, char *inspec, AVFormatContext *oc, AVFormatContext *ic, OptionsContext *o);
     int copy_chapters(InputFile *ifile, OutputFile *ofile, int copy_metadata);
     void tyy_print_AVDirnary(AVDictionary *d);
@@ -896,7 +903,10 @@ public:
 
     // ffmpeg_filters.c
     int init_simple_filtergraph(InputStream *ist, OutputStream *ost);
-    void check_filter_outputs(void);
+    char *describe_filter_link(FilterGraph *fg, AVFilterInOut *inout, int in);
+    int /*void*/ init_input_filter(FilterGraph *fg, AVFilterInOut *in);
+    int init_complex_filtergraph(FilterGraph *fg);
+    int /*void*/ check_filter_outputs(void);
     int filtergraph_is_simple(FilterGraph *fg);
 
     // ffmpeg.c
@@ -906,9 +916,9 @@ public:
     int guess_input_channel_layout(InputStream *ist);
     void abort_codec_experimental(AVCodec *c, int encoder);
     InputStream *get_input_stream(OutputStream *ost);
-    void set_encoder_id(OutputFile *of, OutputStream *ost);
+    int /*void*/ set_encoder_id(OutputFile *of, OutputStream *ost);
     void init_encoder_time_base(OutputStream *ost, AVRational default_time_base);
-    void parse_forced_key_frames(char *kf, OutputStream *ost,
+    int /*void*/ parse_forced_key_frames(char *kf, OutputStream *ost,
                                         AVCodecContext *avctx);
     static int compare_int64(const void *a, const void *b);
     int init_output_stream_encode(OutputStream *ost);
@@ -940,10 +950,10 @@ public:
 
 public:
     // ffmpeg.c
-    int start();
+    //int start();
     void prepare_app_arguments(int *argc_ptr, char ***argv_ptr);
 
-    void init_parse_context(OptionParseContext *octx,
+    int /*void*/ init_parse_context(OptionParseContext *octx,
                                    const OptionGroupDef *groups, int nb_groups);
     int split_commandline(OptionParseContext *octx, int argc, char *argv[],
                           const OptionDef *options,
@@ -957,10 +967,9 @@ public:
     static int get_buffer(AVCodecContext *s, AVFrame *frame, int flags);
     int init_input_stream(int ist_index, char *error, int error_len);
 
-
     int transcode_init(void);
+
 #ifdef HAVE_THREADS
-//#ifdef false
     static void *input_thread(void *arg);// pthread_create的线程回调函数
     void free_input_thread(int i);
     void free_input_threads(void);
@@ -997,9 +1006,9 @@ public:
     enum AVPixelFormat choose_pixel_fmt(AVStream *st, AVCodecContext *enc_ctx, AVCodec *codec, enum AVPixelFormat target);
     char *choose_pix_fmts(OutputFilter *ofilter);
     int configure_output_video_filter(FilterGraph *fg, OutputFilter *ofilter, AVFilterInOut *out);
-    char *choose_sample_fmts_ex (OutputFilter *ofilter);
-    char *choose_sample_rates_ex (OutputFilter *ofilter);
-    char *choose_channel_layouts_ex (OutputFilter *ofilter);
+    char *choose_sample_fmts_ex (OutputFilter *ofilter, int *ret_val);
+    char *choose_sample_rates_ex (OutputFilter *ofilter, int *ret_val);
+    char *choose_channel_layouts_ex (OutputFilter *ofilter, int *ret_val);
     int configure_output_audio_filter(FilterGraph *fg, OutputFilter *ofilter, AVFilterInOut *out);
     int configure_output_filter(FilterGraph *fg, OutputFilter *ofilter, AVFilterInOut *out);
     int sub2video_get_blank_frame(InputStream *ist);
@@ -1016,22 +1025,22 @@ public:
     static char* av_ts2timestr_ex(char *buf, int64_t ts, AVRational *tb);
     static char* av_ts2timestr_ex(char *buf, int64_t ts, AVRational tb);
     void close_all_output_streams(OutputStream *ost, OSTFinished this_stream, OSTFinished others);
-    void write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int unqueue);
-    void output_packet(OutputFile *of, AVPacket *pkt,
+    int /*void*/ write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int unqueue);
+    int /*void*/ output_packet(OutputFile *of, AVPacket *pkt,
                               OutputStream *ost, int eof);
     double psnr(double d);
     void do_video_stats(OutputStream *ost, int frame_size);
-    void do_video_out(OutputFile *of,
+    int /*void*/ do_video_out(OutputFile *of,
                              OutputStream *ost,
                              AVFrame *next_picture,
                              double sync_ipts);
-    void do_audio_out(OutputFile *of, OutputStream *ost,
+    int /*void*/ do_audio_out(OutputFile *of, OutputStream *ost,
                              AVFrame *frame);
     int reap_filters(int flush);
     int transcode_from_filter(FilterGraph *graph, InputStream **best_ist);
     int get_input_packet(InputFile *f, AVPacket *pkt);
     int decode(AVCodecContext *avctx, AVFrame *frame, int *got_frame, AVPacket *pkt);
-    void check_decode_result(InputStream *ist, int *got_output, int ret);
+    int /*void*/ check_decode_result(InputStream *ist, int *got_output, int ret);
     int ifilter_parameters_from_frame(InputFilter *ifilter, const AVFrame *frame);
     int ifilter_send_frame(InputFilter *ifilter, AVFrame *frame);
     int send_frame_to_filters(InputStream *ist, AVFrame *decoded_frame);
@@ -1049,7 +1058,7 @@ public:
     void ifilter_parameters_from_codecpar(InputFilter *ifilter, AVCodecParameters *par);
     int ifilter_send_eof(InputFilter *ifilter, int64_t pts);
     int send_filter_eof(InputStream *ist);
-    void do_streamcopy(InputStream *ist, OutputStream *ost, const AVPacket *pkt);
+    int /*void*/ do_streamcopy(InputStream *ist, OutputStream *ost, const AVPacket *pkt);
     int process_input_packet(InputStream *ist, const AVPacket *pkt, int no_eof);
     AVRational duration_max(int64_t tmp, int64_t *duration, AVRational tmp_time_base,
                                    AVRational time_base);
@@ -1063,7 +1072,7 @@ public:
     void print_final_stats(int64_t total_size);
     void print_report(int is_last_report, int64_t timer_start, int64_t cur_time);
 
-    void flush_encoders(void);
+    int /*void*/ flush_encoders(void);
     void term_exit_sigsafe(void);
     void term_exit(void);
     int64_t getmaxrss(void);
@@ -1141,8 +1150,8 @@ public:
     int want_sdp;
     BenchmarkTimeStamps current_time;
 
-    int64_t decode_error_stat[2];// 记录解码的状态.下标0记录的是成功解码的参数,下标1是失败的次数.
-    int main_return_code = 0;
+    int64_t decode_error_stat[2];   // 记录解码的状态.下标0记录的是成功解码的参数,下标1是失败的次数.
+    int main_return_code = 0;       // 主要记录av_interleaved_write_frame的失败状态
     volatile int received_nb_signals = 0;
     const char program_name[24] = "ffmpeg";
 
@@ -1244,6 +1253,9 @@ private:
 
     // 输出相关参数
     std::string _output_filename;
+
+private:
+    Queue<FMMessage*> *_msg_queue;      // 指向全局队列
 };
 //extern const OptionDef options[];
 // 硬件的后续完善
@@ -1355,6 +1367,6 @@ extern HWDevice *filter_hw_device;          // -filter_hw_device选项
 
 //int hwaccel_decode_init(AVCodecContext *avctx);
 
-
+}
 
 #endif // FFMPEG_H

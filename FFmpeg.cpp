@@ -101,9 +101,10 @@ extern "C"{
 #include "ffmpeg.h"// 不要放进extern，因为ffmpeg.h有C++的模板头文件,C编译器编不过去
 #endif
 
+using namespace HCMFFmpegMedia;
 
 // ffmpeg.c
-const char *const forced_keyframes_const_names[] = {
+const char *const HCMFFmpegMedia::forced_keyframes_const_names[] = {
     "n",
     "n_forced",
     "prev_forced_n",
@@ -116,7 +117,7 @@ const char *const forced_keyframes_const_names[] = {
 // ffmpeg_opt.c
 #define DEFAULT_PASS_LOGFILENAME_PREFIX "ffmpeg2pass"
 
-const HWAccel hwaccels[] = {
+const HWAccel HCMFFmpegMedia::hwaccels[] = {
 #if CONFIG_VIDEOTOOLBOX
     { "videotoolbox", videotoolbox_init, HWACCEL_VIDEOTOOLBOX, AV_PIX_FMT_VIDEOTOOLBOX },
 #endif
@@ -144,7 +145,7 @@ int decode_interrupt_cb(void *ctx)
 //const AVIOInterruptCB int_cb = { decode_interrupt_cb, NULL };
 
 
-FFmpegMedia::FFmpegMedia():
+FFmpegMedia::FFmpegMedia() :
     //int_cb({ decode_interrupt_cb, NULL }),
     int_cb({ decode_interrupt_cb, this }),
     program_birth_year(2000)
@@ -154,11 +155,23 @@ FFmpegMedia::FFmpegMedia():
     transcode_init_done = 0;
 }
 
+FFmpegMedia::FFmpegMedia(Queue<FMMessage*> *msgqueue) :
+    int_cb({ decode_interrupt_cb, this }),
+    program_birth_year(2000)
+{
+    memset_zero_fm();
+    init_g_options();
+    transcode_init_done = 0;
+    _msg_queue = msgqueue;
+}
+
 FFmpegMedia::~FFmpegMedia(){
     if(options){
         delete options;
         options = NULL;
     }
+
+    //_msg_queue->clear();// 不能在这里处理,因为还有消息但未处理,会影响其它正在使用该队列的对象.
 }
 
 void FFmpegMedia::init_dynload(){
@@ -1077,8 +1090,11 @@ int FFmpegMedia::init_input_stream(int ist_index, char *error, int error_len)
         /* 1.4编解码器上下文与编解码器关联.
          * 这里看到，编解码器的相关选项是在这里被应用的 */
         if ((ret = avcodec_open2(ist->dec_ctx, codec, &ist->decoder_opts)) < 0) {
-            if (ret == AVERROR_EXPERIMENTAL)
-                abort_codec_experimental(codec, 0);
+            if (ret == AVERROR_EXPERIMENTAL){
+                //abort_codec_experimental(codec, 0);// 等价于exit_program(1);
+                av_log(NULL, AV_LOG_FATAL, "avcodec_open2 AVERROR_EXPERIMENTAL(0).\n");
+                return -1;
+            }
 
             char str[AV_ERROR_MAX_STRING_SIZE] = {0};
             snprintf(error, error_len,
@@ -1118,7 +1134,7 @@ InputStream *FFmpegMedia::get_input_stream(OutputStream *ost)
  * @param of 输出文件封装结构体
  * @param ost 输出流
  */
-void FFmpegMedia::set_encoder_id(OutputFile *of, OutputStream *ost)
+int FFmpegMedia::set_encoder_id(OutputFile *of, OutputStream *ost)
 {
     AVDictionaryEntry *e;
 
@@ -1130,21 +1146,21 @@ void FFmpegMedia::set_encoder_id(OutputFile *of, OutputStream *ost)
     /* 1.若ost->st->metadata已经存在encoder选项，则返回,不做处理.
      * 因为在open_output_file()时会将每一个流的元数据的encoder置为NULL,所以不会直接返回. */
     if (av_dict_get(ost->st->metadata, "encoder",  NULL, 0))
-        return;
+        return 0;
 
 
-    {
-        //tyycode
-        /* 测试av_opt_eval_flags():可以看到，从of-ctx找到fflags后，就是libavformat/options_table.h文件里的变量
-         * static const AVOption avformat_options[]的fflags选项. */
-        const AVOption *o = av_opt_find(of->ctx, "fflags", NULL, 0, 0);
-        if (!o)
-            return;
-        /* 假设解复用选项of->opts的fflags的value值被设为"32"，那么通过av_opt_eval_flags()后，将里面的数字会设置到format_flags中，
-         * 所以看到，format_flags的值 从0变成32.注，因为fflags是int64(具体类型需要看源码)，
-         * 所以必须是该类型是字符串，例下面"32"写成"32.2"是无法读到数字的 */
-        av_opt_eval_flags(of->ctx, o, "32", &format_flags);
-    }
+//    {
+//        //tyycode
+//        /* 测试av_opt_eval_flags():可以看到，从of-ctx找到fflags后，就是libavformat/options_table.h文件里的变量
+//         * static const AVOption avformat_options[]的fflags选项. */
+//        const AVOption *o = av_opt_find(of->ctx, "fflags", NULL, 0, 0);
+//        if (!o)
+//            return;
+//        /* 假设解复用选项of->opts的fflags的value值被设为"32"，那么通过av_opt_eval_flags()后，将里面的数字会设置到format_flags中，
+//         * 所以看到，format_flags的值 从0变成32.注，因为fflags是int64(具体类型需要看源码)，
+//         * 所以必须是该类型是字符串，例下面"32"写成"32.2"是无法读到数字的 */
+//        av_opt_eval_flags(of->ctx, o, "32", &format_flags);
+//    }
 
     /* 2.若用户设置了解复用的fflags选项，则进行获取，然后保存在临时变量format_flags中 */
     /* 关于AVOption模块，可参考: https://blog.csdn.net/ericbar/article/details/79872779 */
@@ -1153,7 +1169,7 @@ void FFmpegMedia::set_encoder_id(OutputFile *of, OutputStream *ost)
         // 若解复用不支持fflags选项，则返回
         const AVOption *o = av_opt_find(of->ctx, "fflags", NULL, 0, 0);
         if (!o)
-            return;
+            return -1;
         /* opt_eval_funcs: 计算选项字符串。这组函数可用于计算选项字符串并从中获取数字。它们所做的事情与av_opt_set()相同，只是结果被写入调用方提供的指针 */
         av_opt_eval_flags(of->ctx, o, e->value, &format_flags);
     }
@@ -1163,15 +1179,17 @@ void FFmpegMedia::set_encoder_id(OutputFile *of, OutputStream *ost)
     if (e) {
         const AVOption *o = av_opt_find(ost->enc_ctx, "flags", NULL, 0, 0);
         if (!o)
-            return;
+            return -1;
         av_opt_eval_flags(ost->enc_ctx, o, e->value, &codec_flags);
     }
 
     /* 4.获取编码器名字encoder选项的长度.LIBAVCODEC_IDENT宏里面的 ## 是拼接前后两个宏参数的意思. */
     encoder_string_len = sizeof(LIBAVCODEC_IDENT) + strlen(ost->enc->name) + 2;
     encoder_string     = (uint8_t *)av_mallocz(encoder_string_len);
-    if (!encoder_string)
-        exit_program(1);
+    if (!encoder_string){
+        //exit_program(1);
+        return -1;
+    }
 
     /* 5.若format_flags和codec_flags都不包含宏AVFMT_FLAG_BITEXACT，则使用LIBAVCODEC_IDENT字符串,
         否则直接使用"Lavc ". */
@@ -1196,6 +1214,8 @@ void FFmpegMedia::set_encoder_id(OutputFile *of, OutputStream *ost)
             printf("tyy_print_AVDirnary, t->key: %s, t->value: %s\n", t->key, t->value);
         }
     }
+
+    return 0;
 }
 
 /**
@@ -1247,7 +1267,7 @@ int FFmpegMedia::compare_int64(const void *a, const void *b)
 /**
  * @brief 后续遇到再分析，因为比较少用
 */
-void FFmpegMedia::parse_forced_key_frames(char *kf, OutputStream *ost,
+int FFmpegMedia::parse_forced_key_frames(char *kf, OutputStream *ost,
                                     AVCodecContext *avctx)
 {
     char *p;
@@ -1261,7 +1281,8 @@ void FFmpegMedia::parse_forced_key_frames(char *kf, OutputStream *ost,
     pts = (int64_t *)av_malloc_array(size, sizeof(*pts));
     if (!pts) {
         av_log(NULL, AV_LOG_FATAL, "Could not allocate forced key frames array.\n");
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
 
     p = kf;
@@ -1281,7 +1302,8 @@ void FFmpegMedia::parse_forced_key_frames(char *kf, OutputStream *ost,
                                      sizeof(*pts)))) {
                 av_log(NULL, AV_LOG_FATAL,
                        "Could not allocate forced key frames array.\n");
-                exit_program(1);
+                //exit_program(1);
+                return -1;
             }
             t = p[8] ? parse_time_or_die("force_key_frames", p + 8, 1) : 0;
             t = av_rescale_q(t, AV_TIME_BASE_Q, avctx->time_base);
@@ -1308,6 +1330,8 @@ void FFmpegMedia::parse_forced_key_frames(char *kf, OutputStream *ost,
     qsort(pts, size, sizeof(*pts), compare_int64);
     ost->forced_kf_count = size;
     ost->forced_kf_pts   = pts;
+
+    return 0;
 }
 
 /**
@@ -1325,7 +1349,11 @@ int FFmpegMedia::init_output_stream_encode(OutputStream *ost)
     int j, ret;
 
     /* 1.给输出流的元数据添加encoder选项 */
-    set_encoder_id(output_files[ost->file_index], ost);
+    ret = set_encoder_id(output_files[ost->file_index], ost);
+    if(ret < 0){
+        av_log(NULL, AV_LOG_ERROR, "set_encoder_id failed.\n");
+        return -1;
+    }
 
     // Muxers use AV_PKT_DATA_DISPLAYMATRIX to signal rotation. On the other
     // hand, the legacy API makes demuxers set "rotate" metadata entries,
@@ -1520,7 +1548,12 @@ int FFmpegMedia::init_output_stream_encode(OutputStream *ost)
                 // parse it only for static kf timings
                 //(不要在'keep-source-keyframes'的情况下解析' force_keyframes '，只在静态kf计时时解析它)
             } else if(strncmp(ost->forced_keyframes, "source", 6)) {
-                parse_forced_key_frames(ost->forced_keyframes, ost, ost->enc_ctx);
+                ret = parse_forced_key_frames(ost->forced_keyframes, ost, ost->enc_ctx);
+                if (ret < 0) {
+                    av_log(NULL, AV_LOG_ERROR,
+                           "parse_forced_key_frames failed.\n");
+                    return ret;
+                }
             }
         }
         break;
@@ -1535,7 +1568,8 @@ int FFmpegMedia::init_output_stream_encode(OutputStream *ost)
     case AVMEDIA_TYPE_DATA:
         break;
     default:
-        abort();
+        //abort();
+        return -1;
         break;
     }
 
@@ -1689,7 +1723,8 @@ int FFmpegMedia::init_output_stream_streamcopy(OutputStream *ost)
          当不是256说明用户添加-vol，就需要解码，而用户又指定了copy，所以ffmpeg会报错.*/
         if (audio_volume != 256) {
             av_log(NULL, AV_LOG_FATAL, "-acodec copy and -vol are incompatible (frames are not decoded)\n");
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
         /* block_align: 仅音频。某些格式所需的每个编码音频帧的字节数。
          * 对应于WAVEFORMATEX中的nBlockAlign。*/
@@ -1907,7 +1942,10 @@ int FFmpegMedia::check_init_output_file(OutputFile *of, int file_index)
         while (av_fifo_size(ost->muxing_queue)) {
             AVPacket pkt;
             av_fifo_generic_read(ost->muxing_queue, &pkt, sizeof(pkt), NULL);
-            write_packet(of, &pkt, ost, 1);
+            ret = write_packet(of, &pkt, ost, 1);
+            if(ret < 0){
+                return -1;
+            }
         }
     }
 
@@ -2035,8 +2073,12 @@ int FFmpegMedia::init_output_stream(OutputStream *ost, char *error, int error_le
         /* 1.7编解码器上下文与编解码器关联.
          * 这里看到，编解码器的相关选项是在这里被应用的 */
         if ((ret = avcodec_open2(ost->enc_ctx, codec, &ost->encoder_opts)) < 0) {
-            if (ret == AVERROR_EXPERIMENTAL)
-                abort_codec_experimental(codec, 1);
+            if (ret == AVERROR_EXPERIMENTAL){
+                //abort_codec_experimental(codec, 1);
+                av_log(NULL, AV_LOG_FATAL, "avcodec_open2 AVERROR_EXPERIMENTAL(1).\n");
+                return -1;
+            }
+
             snprintf(error, error_len,
                      "Error while opening encoder for output stream #%d:%d - "
                      "maybe incorrect parameters such as bit_rate, rate, width or height",
@@ -2065,7 +2107,8 @@ int FFmpegMedia::init_output_stream(OutputStream *ost, char *error, int error_le
         if (ret < 0) {
             av_log(NULL, AV_LOG_FATAL,
                    "Error initializing the output stream codec context.\n");
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
 
         /* 1.11将ost->enc_ctx拷贝到ost->st->codec，这一步可以不需要？
@@ -3551,7 +3594,7 @@ int FFmpegMedia::configure_input_filter(FilterGraph *fg, InputFilter *ifilter,
     switch (avfilter_pad_get_type(in->filter_ctx->input_pads, in->pad_idx)) {
     case AVMEDIA_TYPE_VIDEO: return configure_input_video_filter(fg, ifilter, in);
     case AVMEDIA_TYPE_AUDIO: return configure_input_audio_filter(fg, ifilter, in);
-    default: av_assert0(0);
+    default: /*av_assert0(0);*/ return -1;
     }
 }
 
@@ -3875,10 +3918,11 @@ int FFmpegMedia::configure_output_video_filter(FilterGraph *fg, OutputFilter *of
 
 
 #define DEF_CHOOSE_FORMAT_EX(suffix, type, var, supported_list, none, get_name)   \
-char *FFmpegMedia::choose_ ## suffix (OutputFilter *ofilter)                         \
+char *FFmpegMedia::choose_ ## suffix (OutputFilter *ofilter, int *ret_val)                   \
 {                                                                              \
+    *ret_val = 0;                                                                \
     if (ofilter->var != none) {                                                \
-        get_name((type)ofilter->var);                                                \
+        get_name((type)ofilter->var);                                          \
         return av_strdup(name);                                                \
     } else if (ofilter->supported_list) {                                      \
         const type *p;                                                         \
@@ -3886,11 +3930,12 @@ char *FFmpegMedia::choose_ ## suffix (OutputFilter *ofilter)                    
         uint8_t *ret;                                                          \
         int len;                                                               \
                                                                                \
-        if (avio_open_dyn_buf(&s) < 0)                                         \
-            exit_program(1);                                                   \
-                                                                               \
-        for (p = (const type *)ofilter->supported_list; *p != none; p++) {                   \
-            get_name((type)*p);                                                      \
+        if (avio_open_dyn_buf(&s) < 0) {                                        \
+            *ret_val = -1;                                                       \
+            return NULL;/* exit_program(1) */                                   \
+        }                                                                      \
+        for (p = (const type *)ofilter->supported_list; *p != none; p++) {     \
+            get_name((type)*p);                                                \
             avio_printf(s, "%s|", name);                                       \
         }                                                                      \
         len = avio_close_dyn_buf(s, &ret);                                     \
@@ -3996,9 +4041,21 @@ int FFmpegMedia::configure_output_audio_filter(FilterGraph *fg, OutputFilter *of
 //    sample_fmts     = choose_sample_fmts(ofilter);
 //    sample_rates    = choose_sample_rates(ofilter);
 //    channel_layouts = choose_channel_layouts(ofilter);
-    sample_fmts     = choose_sample_fmts_ex(ofilter);
-    sample_rates    = choose_sample_rates_ex(ofilter);
-    channel_layouts = choose_channel_layouts_ex(ofilter);
+    sample_fmts     = choose_sample_fmts_ex(ofilter, &ret);
+    if(!sample_fmts && ret == -1){
+        av_log(NULL, AV_LOG_ERROR, "choose_sample_fmts_ex failed.\n");
+        return -1;
+    }
+    sample_rates    = choose_sample_rates_ex(ofilter, &ret);
+    if(!sample_rates && ret == -1){
+        av_log(NULL, AV_LOG_ERROR, "choose_sample_rates_ex failed.\n");
+        return -1;
+    }
+    channel_layouts = choose_channel_layouts_ex(ofilter, &ret);
+    if(!channel_layouts && ret == -1){
+        av_log(NULL, AV_LOG_ERROR, "choose_channel_layouts_ex failed.\n");
+        return -1;
+    }
     if (sample_fmts || sample_rates || channel_layouts) {
         AVFilterContext *format;
         char args[256];
@@ -4094,14 +4151,15 @@ int FFmpegMedia::configure_output_filter(FilterGraph *fg, OutputFilter *ofilter,
     // 1. 要配置的输出过滤器对应的输出流为空,报错.
     if (!ofilter->ost) {
         av_log(NULL, AV_LOG_FATAL, "Filter %s has an unconnected output\n", ofilter->name);
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
 
     // 2. 根据不同的媒体类型配置输出filter.
     switch (avfilter_pad_get_type(out->filter_ctx->output_pads, out->pad_idx)) {
     case AVMEDIA_TYPE_VIDEO: return configure_output_video_filter(fg, ofilter, out);
     case AVMEDIA_TYPE_AUDIO: return configure_output_audio_filter(fg, ofilter, out);
-    default: av_assert0(0);
+    default: /*av_assert0(0);*/return -1;
     }
 }
 
@@ -4376,8 +4434,16 @@ int FFmpegMedia::configure_filtergraph(FilterGraph *fg)
 
     // 6.2 配置输出过滤器.
     // 配置完后,OutputFilter->filter保存着输出过滤器链表的尾,即指向buffersink,abuffersink.
-    for (cur = outputs, i = 0; cur; cur = cur->next, i++)
-        configure_output_filter(fg, fg->outputs[i], cur);
+    for (cur = outputs, i = 0; cur; cur = cur->next, i++){
+        //configure_output_filter(fg, fg->outputs[i], cur);
+        ret = configure_output_filter(fg, fg->outputs[i], cur);// 注,ffmpeg本身没出来这个函数的返回值
+        if(ret < 0){
+            av_log(NULL, AV_LOG_ERROR, "configure_output_filter failed.\n");
+            avfilter_inout_free(&outputs);// tyycode
+            goto fail;
+        }
+    }
+
     avfilter_inout_free(&outputs);
 
     /* 注意!!! 输入和输出过滤器是如何链接起来的呢？
@@ -4572,7 +4638,7 @@ void FFmpegMedia::close_all_output_streams(OutputStream *ost, OSTFinished this_s
  * @param ost 输出流
  * @param unqueue 是否已经计算该pkt在ost->frame_number中,=1表示已经计算。see check_init_output_file()
 */
-void FFmpegMedia::write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int unqueue)
+int FFmpegMedia::write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, int unqueue)
 {
     AVFormatContext *s = of->ctx;
     AVStream *st = ost->st;
@@ -4597,7 +4663,7 @@ void FFmpegMedia::write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost,
     if (!(st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && ost->encoding_needed) && !unqueue) {
         if (ost->frame_number >= ost->max_frames) {//帧数大于允许的最大帧数，不作处理，并将该包释放
             av_packet_unref(pkt);
-            return;
+            return 0;// 暂时认为正常
         }
 
         ost->frame_number++;// 视频流需要编码时，不会在这里计数，会在do_video_out()单独计数
@@ -4624,11 +4690,14 @@ void FFmpegMedia::write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost,
                 av_log(NULL, AV_LOG_ERROR,
                        "Too many packets buffered for output stream %d:%d.\n",
                        ost->file_index, ost->st->index);
-                exit_program(1);
+                //exit_program(1);
+                return -1;
             }
             ret = av_fifo_realloc2(ost->muxing_queue, new_size);
-            if (ret < 0)
-                exit_program(1);
+            if (ret < 0){
+                //exit_program(1);
+                return -1;
+            }
         }
 
         /*
@@ -4642,8 +4711,10 @@ void FFmpegMedia::write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost,
          * 拷贝packet数据到pkt->buf->data中，再令pkt->data指向它.
          */
         ret = av_packet_make_refcounted(pkt);
-        if (ret < 0)
-            exit_program(1);
+        if (ret < 0){
+            //exit_program(1);
+            return -1;
+        }
         av_packet_move_ref(&tmp_pkt, pkt);// 所有权转移，源码很简单
         /*
          * av_fifo_generic_write(): 将数据从用户提供的回调提供给AVFifoBuffer。
@@ -4656,7 +4727,7 @@ void FFmpegMedia::write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost,
          * av_fifo_generic_write()的源码不算难.
          */
         av_fifo_generic_write(ost->muxing_queue, &tmp_pkt, sizeof(tmp_pkt), NULL);
-        return;
+        return 0;
     }
 
     // 3. 将pkt.pts/pkt.dts置为无效值
@@ -4777,7 +4848,8 @@ void FFmpegMedia::write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost,
                        ost->file_index, ost->st->index, ost->last_mux_dts, pkt->dts);// dts没有单调递增
                 if (exit_on_error) {//-xerror选项，默认是0
                     av_log(NULL, AV_LOG_FATAL, "aborting.\n");
-                    exit_program(1);
+                    //exit_program(1);
+                    return -1;
                 }
                 av_log(s, loglevel, "changing to %" PRId64". This may result "
                        "in incorrect timestamps in the output file.\n",
@@ -4818,6 +4890,8 @@ void FFmpegMedia::write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost,
         close_all_output_streams(ost, OSTFinished(MUXER_FINISHED | ENCODER_FINISHED), ENCODER_FINISHED);
     }
     av_packet_unref(pkt);
+
+    return ret;
 }
 
 /*
@@ -4842,7 +4916,7 @@ void FFmpegMedia::write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost,
  * @param ost 输出流
  * @param eof eof
 */
-void FFmpegMedia::output_packet(OutputFile *of, AVPacket *pkt,
+int FFmpegMedia::output_packet(OutputFile *of, AVPacket *pkt,
                           OutputStream *ost, int eof)
 {
     int ret = 0;
@@ -4877,21 +4951,42 @@ void FFmpegMedia::output_packet(OutputFile *of, AVPacket *pkt,
                     goto finish;
                 idx++;
                 eof = 0;
-            } else if (eof)
+            } else if (eof){
                 goto finish;
-            else
-                write_packet(of, pkt, ost, 0);
+            } else{
+                ret = write_packet(of, pkt, ost, 0);
+                if(ret < 0){
+                    goto finish;
+                }
+            }
+
         }
-    } else if (!eof)// 2. 没位流的流程, 且eof=0. 没位流 且 eof=1时，该函数不处理任何东西
-        write_packet(of, pkt, ost, 0);
+    } else if (!eof){
+        // 2. 没位流的流程, 且eof=0. 没位流 且 eof=1时，该函数不处理任何东西
+        ret = write_packet(of, pkt, ost, 0);
+        if(ret < 0){
+            goto finish;
+        }
+    }
 
 finish:
     if (ret < 0 && ret != AVERROR_EOF) {
         av_log(NULL, AV_LOG_ERROR, "Error applying bitstream filters to an output "
                "packet for stream #%d:%d.\n", ost->file_index, ost->index);
-        if(exit_on_error)
-            exit_program(1);
+        if(exit_on_error){
+            //exit_program(1);
+            return -2;
+        }
+
+        return ret;
     }
+
+    /* 注意: ffmpeg本身对于 使用位流发生错误时 是没处理返回值的(因为每次调用output_packet都是没处理返回值),
+        而我们在调用output_packet的地方处理返回值后,位流发送错误相当于处理了,这是区别.
+        不想让位流失败退出，可以在位流失败处将ret置为0(或者增加变量记录). */
+
+    //return 0;//不能直接返回0,因为来到这里可能是0或者eof
+    return ret;
 }
 
 double FFmpegMedia::psnr(double d)
@@ -4916,7 +5011,8 @@ void FFmpegMedia::do_video_stats(OutputStream *ost, int frame_size)
         vstats_file = fopen(vstats_filename, "w");
         if (!vstats_file) {
             perror("fopen");
-            exit_program(1);
+            //exit_program(1);
+            return;// 这里打开失败暂时不做处理
         }
     }
 
@@ -4955,7 +5051,7 @@ void FFmpegMedia::do_video_stats(OutputStream *ost, int frame_size)
  * @param next_picture 要编码的帧
  * @param sync_ipts 要编码的帧的pts.即AVFrame->pts的值,但精度更好
 */
-void FFmpegMedia::do_video_out(OutputFile *of,
+int FFmpegMedia::do_video_out(OutputFile *of,
                          OutputStream *ost,
                          AVFrame *next_picture,
                          double sync_ipts)
@@ -5151,7 +5247,7 @@ void FFmpegMedia::do_video_out(OutputFile *of,
             ost->sync_opts = lrint(sync_ipts);
             break;
         default:
-            av_assert0(0);
+            /*av_assert0(0);*/return -1;
         }
     }//<== else end ==>
 
@@ -5187,7 +5283,7 @@ void FFmpegMedia::do_video_out(OutputFile *of,
         if (nb_frames > dts_error_threshold * 30) {
             av_log(NULL, AV_LOG_ERROR, "%d frame duplication too large, skipping\n", nb_frames - 1);
             nb_frames_drop++;
-            return;
+            return 0;// 认为正常,不让该推流退出
         }
         nb_frames_dup += nb_frames - (nb0_frames && ost->last_dropped) - (nb_frames > nb0_frames);
         av_log(NULL, AV_LOG_VERBOSE, "*** %d dup!\n", nb_frames - 1);
@@ -5216,14 +5312,14 @@ void FFmpegMedia::do_video_out(OutputFile *of,
             in_picture = next_picture;
 
         if (!in_picture)
-            return;
+            return 0;
 
         // 6.2 更新要编码的帧的pts
         in_picture->pts = ost->sync_opts;
 
         // 6.3 检查录像时间
         if (!check_recording_time(ost))
-            return;
+            return 0;// 返回0应该也没问题,因为函数内部会标记ost已经完成
 
         // 6.4 设置in_picture的一些参数
         // 包含两个宏其中之一 并且 top_field_first>=0
@@ -5359,7 +5455,11 @@ void FFmpegMedia::do_video_out(OutputFile *of,
             frame_size = pkt.size;// 记录当前帧大小
 
             // 6.7.4 写帧
-            output_packet(of, &pkt, ost, 0);
+            ret = output_packet(of, &pkt, ost, 0);
+            if(ret < 0){
+                av_log(NULL, AV_LOG_ERROR, "output_packet failed, ret: %d\n", ret);
+                goto error;
+            }
 
             /* if two pass, output log */
             if (ost->logfile && enc->stats_out) {// 忽略，推流没用到
@@ -5397,10 +5497,12 @@ void FFmpegMedia::do_video_out(OutputFile *of,
     else
         av_frame_free(&ost->last_frame);// next_picture为空会进入这里，因为last_frame在上面是av_frame_alloc的
 
-    return;
+    return 0;
+
 error:
     av_log(NULL, AV_LOG_FATAL, "Video encoding failed\n");
-    exit_program(1);
+    //exit_program(1);
+    return ret;
 }
 
 /**
@@ -5411,7 +5513,7 @@ error:
  * @return void.
  * @note 成功或者输出流完成编码不返回任何内容, 失败程序退出.
 */
-void FFmpegMedia::do_audio_out(OutputFile *of, OutputStream *ost,
+int FFmpegMedia::do_audio_out(OutputFile *of, OutputStream *ost,
                          AVFrame *frame)
 {
     AVCodecContext *enc = ost->enc_ctx;
@@ -5424,7 +5526,7 @@ void FFmpegMedia::do_audio_out(OutputFile *of, OutputStream *ost,
 
     // 1. 检查该输出流是否完成编码.
     if (!check_recording_time(ost))
-        return;
+        return 0;
 
     // 2. 输入帧为空，或者 audio_sync_method小于0，pts会参考ost->sync_opts.
     // audio_sync_method默认0
@@ -5485,13 +5587,17 @@ void FFmpegMedia::do_audio_out(OutputFile *of, OutputStream *ost,
         }
 
         // 6.3 写帧
-        output_packet(of, &pkt, ost, 0);
+        ret = output_packet(of, &pkt, ost, 0);
+        if(ret < 0){
+            goto error;
+        }
     }
 
-    return;
+    return 0;
 error:
     av_log(NULL, AV_LOG_FATAL, "Audio encoding failed\n");
-    exit_program(1);
+    //exit_program(1);
+    return ret;
 }
 
 /**
@@ -5537,7 +5643,8 @@ int FFmpegMedia::reap_filters(int flush)
             if (ret < 0) {
                 av_log(NULL, AV_LOG_ERROR, "Error initializing output stream %d:%d -- %s\n",
                        ost->file_index, ost->index, error);
-                exit_program(1);
+                //exit_program(1);
+                return ret;
             }
         }
 
@@ -5562,8 +5669,13 @@ int FFmpegMedia::reap_filters(int flush)
                     av_log(NULL, AV_LOG_WARNING,
                            "Error in av_buffersink_get_frame_flags(): %s\n", av_err2str_ex(str, ret));
                 } else if (flush && ret == AVERROR_EOF) {/* flush=1且是文件末尾 */
-                    if (av_buffersink_get_type(filter) == AVMEDIA_TYPE_VIDEO)
-                        do_video_out(of, ost, NULL, AV_NOPTS_VALUE);// 转码结束时从transcode_from_filter()会来到这个逻辑
+                    if (av_buffersink_get_type(filter) == AVMEDIA_TYPE_VIDEO){
+                        ret = do_video_out(of, ost, NULL, AV_NOPTS_VALUE);// 转码结束时从transcode_from_filter()会来到这个逻辑
+                        if(ret < 0){
+                            av_log(NULL, AV_LOG_ERROR, "do_video_out flush null frame failed.\n");
+                            return -1;
+                        }
+                    }
                 }
                 break;
             }
@@ -5632,7 +5744,11 @@ int FFmpegMedia::reap_filters(int flush)
                             enc->time_base.num, enc->time_base.den);
                 }
 
-                do_video_out(of, ost, filtered_frame, float_pts);
+                ret = do_video_out(of, ost, filtered_frame, float_pts);
+                if(ret < 0){
+                    av_log(NULL, AV_LOG_ERROR, "do_video_out failed.\n");
+                    return -1;
+                }
                 break;
             case AVMEDIA_TYPE_AUDIO:
                 // AV_CODEC_CAP_PARAM_CHANGE: 编解码器支持在任何点更改参数。
@@ -5642,11 +5758,17 @@ int FFmpegMedia::reap_filters(int flush)
                            "Audio filter graph output is not normalized and encoder does not support parameter changes\n");
                     break;
                 }
-                do_audio_out(of, ost, filtered_frame);
+
+                ret = do_audio_out(of, ost, filtered_frame);
+                if(ret < 0){
+                    av_log(NULL, AV_LOG_ERROR, "do_audio_out failed.\n");
+                    return -1;
+                }
                 break;
             default:
                 // TODO support subtitle filters
-                av_assert0(0);
+                //av_assert0(0);
+                return -1;
             }//<== switch (av_buffersink_get_type(filter)) end ==>
 
 
@@ -5848,7 +5970,7 @@ int FFmpegMedia::decode(AVCodecContext *avctx, AVFrame *frame, int *got_frame, A
  * @param got_output decode的传出参数.
  * @param ret 解码后的返回值
 */
-void FFmpegMedia::check_decode_result(InputStream *ist, int *got_output, int ret)
+int FFmpegMedia::check_decode_result(InputStream *ist, int *got_output, int ret)
 {
     // 1. 保存成功解码一帧的次数,以及解码失败的次数.
     /* 分析got_output、ret的情况:
@@ -5863,8 +5985,10 @@ void FFmpegMedia::check_decode_result(InputStream *ist, int *got_output, int ret
         decode_error_stat[ret<0] ++;
 
     // 2. 若解码失败 且 用户指定-xerror选项,那么程序退出.
-    if (ret < 0 && exit_on_error)
-        exit_program(1);
+    if (ret < 0 && exit_on_error){
+        //exit_program(1);
+        return -1;
+    }
 
     // 3. 解码帧成功,但是该帧存在错误.用户指定-xerror选项,那么程序退出.没指定只会报警告.
     if (*got_output && ist) {
@@ -5874,10 +5998,14 @@ void FFmpegMedia::check_decode_result(InputStream *ist, int *got_output, int ret
         if (ist->decoded_frame->decode_error_flags || (ist->decoded_frame->flags & AV_FRAME_FLAG_CORRUPT)) {
             av_log(NULL, exit_on_error ? AV_LOG_FATAL : AV_LOG_WARNING,
                    "%s: corrupt decoded frame in stream %d\n", input_files[ist->file_index]->ctx->url, ist->st->index);
-            if (exit_on_error)
-                exit_program(1);
+            if (exit_on_error){
+                //exit_program(1);
+                return -1;
+            }
         }
     }
+
+    return 0;
 }
 
 /**
@@ -6107,8 +6235,13 @@ int FFmpegMedia::decode_audio(InputStream *ist, AVPacket *pkt, int *got_output,
     }
 
     // 3.3 check_decode_result处理.该函数里面若用户没指定-xerror选项,内部不会做太多处理,可以忽略它
-    if (ret != AVERROR_EOF)
+    if (ret != AVERROR_EOF){
         check_decode_result(ist, got_output, ret);
+        /*ret = check_decode_result(ist, got_output, ret);
+        if(ret < 0){// 这个函数不处理返回值感觉更好
+            return -1;
+        }*/
+    }
 
     // 3.4 eagain/eof/或者真正的错误(没指定-xerror时),直接返回
     if (!*got_output || ret < 0)
@@ -6256,7 +6389,7 @@ int FFmpegMedia::decode_video(InputStream *ist, AVPacket *pkt, int *got_output, 
     // 6. 返回值相关处理
     // 6.1 check_decode_result处理.该函数里面若用户没指定-xerror选项,内部不会做太多处理,可以忽略它
     if (ret != AVERROR_EOF)
-        check_decode_result(ist, got_output, ret);
+        check_decode_result(ist, got_output, ret);// 该函数不处理返回值感觉更好
 
     // 6.2 成功拿到解码一帧的判断,解码帧与解码器的参数是否一致
     if (*got_output && ret >= 0) {
@@ -6630,13 +6763,14 @@ int FFmpegMedia::send_filter_eof(InputStream *ist)
 /**
  * @brief 后续详细分析.比转码会简单很多.
  */
-void FFmpegMedia::do_streamcopy(InputStream *ist, OutputStream *ost, const AVPacket *pkt)
+int FFmpegMedia::do_streamcopy(InputStream *ist, OutputStream *ost, const AVPacket *pkt)
 {
     OutputFile *of = output_files[ost->file_index];
     InputFile   *f = input_files [ist->file_index];
     int64_t start_time = (of->start_time == AV_NOPTS_VALUE) ? 0 : of->start_time;
     int64_t ost_tb_start_time = av_rescale_q(start_time, AV_TIME_BASE_Q, ost->mux_timebase);
     AVPacket opkt = { 0 };
+    int ret;
 
     av_init_packet(&opkt);
 
@@ -6644,13 +6778,14 @@ void FFmpegMedia::do_streamcopy(InputStream *ist, OutputStream *ost, const AVPac
     // EOF: flush output bitstream filters.(冲洗输出比特流过滤器)
     if (!pkt) {
         output_packet(of, &opkt, ost, 1);
-        return;
+        //ret = output_packet(of, &opkt, ost, 1);// 应该主要与比特流有关,比特流的可以不处理返回值
+        return 0;// 暂时认为正常
     }
 
     // 2. (帧数=0 且 是非关键帧) 且 没指定复制最初的非关键帧
     if ((!ost->frame_number && !(pkt->flags & AV_PKT_FLAG_KEY)) &&
         !ost->copy_initial_nonkeyframes)
-        return;
+        return 0;// 暂时认为正常
 
     // 3. 帧数=0 且 没指定-copypriorss选项
     if (!ost->frame_number && !ost->copy_prior_start) {
@@ -6660,14 +6795,14 @@ void FFmpegMedia::do_streamcopy(InputStream *ist, OutputStream *ost, const AVPac
         if (pkt->pts == AV_NOPTS_VALUE ?
             ist->pts < comp_start :
             pkt->pts < av_rescale_q(comp_start, AV_TIME_BASE_Q, ist->st->time_base))
-            return;
+            return 0;// 暂时认为正常
     }
 
     // 4. 当前时间 >= 输出文件要录像的时间,录像完毕
     if (of->recording_time != INT64_MAX &&
         ist->pts >= of->recording_time + start_time) {
         close_output_stream(ost);
-        return;
+        return 0;// 暂时认为正常
     }
 
     // 5. 当前时间 >= 输入文件要录像的时间,录像完毕.
@@ -6677,7 +6812,7 @@ void FFmpegMedia::do_streamcopy(InputStream *ist, OutputStream *ost, const AVPac
             start_time += f->start_time;
         if (ist->pts >= f->recording_time + start_time) {
             close_output_stream(ost);
-            return;
+            return 0;// 暂时认为正常
         }
     }
 
@@ -6716,8 +6851,10 @@ void FFmpegMedia::do_streamcopy(InputStream *ist, OutputStream *ost, const AVPac
     // 10. buf引用和data,size的赋值处理
     if (pkt->buf) {
         opkt.buf = av_buffer_ref(pkt->buf);
-        if (!opkt.buf)
-            exit_program(1);
+        if (!opkt.buf){
+            //exit_program(1);
+            return -1;
+        }
     }
     opkt.data = pkt->data;
     opkt.size = pkt->size;
@@ -6726,7 +6863,8 @@ void FFmpegMedia::do_streamcopy(InputStream *ist, OutputStream *ost, const AVPac
     av_copy_packet_side_data(&opkt, pkt);
 
     // 12. 写包
-    output_packet(of, &opkt, ost, 0);
+    //output_packet(of, &opkt, ost, 0);
+    return output_packet(of, &opkt, ost, 0);
 }
 
 /* pkt = NULL means EOF (needed to flush decoder buffers) */
@@ -6893,8 +7031,10 @@ int FFmpegMedia::process_input_packet(InputStream *ist, const AVPacket *pkt, int
                        "data for stream #%d:%d\n", ist->file_index, ist->st->index);
             }
             // 这里看到,当没指定-xerror选项,解码失败不会直接退出程序,只有decode_failed=0才会.
-            if (!decode_failed || exit_on_error)
-                exit_program(1);
+            if (!decode_failed /* ret小于0,但不是解码失败导致的小于0 */ || exit_on_error){
+                //exit_program(1);
+                return -1;
+            }
             break;
         }
 
@@ -6932,7 +7072,8 @@ int FFmpegMedia::process_input_packet(InputStream *ist, const AVPacket *pkt, int
         int ret = send_filter_eof(ist);
         if (ret < 0) {
             av_log(NULL, AV_LOG_FATAL, "Error marking filters as finished\n");
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
     }
 
@@ -6990,7 +7131,11 @@ int FFmpegMedia::process_input_packet(InputStream *ist, const AVPacket *pkt, int
             continue;
 
         // 这里的copy可认为是相当于的编码操作
-        do_streamcopy(ist, ost, pkt);
+        ret = do_streamcopy(ist, ost, pkt);
+        if(ret < 0){
+            av_log(NULL, AV_LOG_FATAL, "do_streamcopy failed.\n");
+            return ret;
+        }
     }
 
     return !eof_reached;
@@ -7235,6 +7380,10 @@ int FFmpegMedia::process_input(int file_index)
             avctx = ist->dec_ctx;
             if (ist->decoding_needed) {
                 ret = process_input_packet(ist, NULL, 1);//传NULL代表刷空包,参3传1代表不想输入过滤器发送eof,因为这里是循环
+                if(ret < 0){// tyycode 失败直接返回.
+                    av_log(NULL, AV_LOG_FATAL, "process_input_packet(1) flush NULL pkt failed.\n");
+                    return ret;
+                }
                 if (ret>0)//1代表eof未到来,那么就先返回, 只有解码器的eof到来才会往下执行重置解码器
                     return 0;
 
@@ -7273,8 +7422,10 @@ int FFmpegMedia::process_input(int file_index)
         // 1.3.1 遇到真正错误并指定-xerror选项,直接退出
         if (ret != AVERROR_EOF) {
             print_error(is->url, ret);
-            if (exit_on_error)
-                exit_program(1);
+            if (exit_on_error){
+                //exit_program(1);
+                return ret;
+            }
         }
 
         // 1.3.2 遍历所有输入流做清理工作
@@ -7283,6 +7434,10 @@ int FFmpegMedia::process_input(int file_index)
             ist = input_streams[ifile->ist_index + i];
             if (ist->decoding_needed) {
                 ret = process_input_packet(ist, NULL, 0);// 参3传0代表向过滤器发送eof,因为这里是真正结束了
+                if(ret < 0){// tyycode 失败直接返回.
+                    av_log(NULL, AV_LOG_FATAL, "process_input_packet(0 send eof to filter) flush NULL pkt failed.\n");
+                    return ret;
+                }
                 if (ret>0)// 这里看到,会先清理完解码器后,再往下清理输出流.
                     return 0;
             }
@@ -7333,8 +7488,10 @@ int FFmpegMedia::process_input(int file_index)
     if (pkt.flags & AV_PKT_FLAG_CORRUPT) {
         av_log(NULL, exit_on_error ? AV_LOG_FATAL : AV_LOG_WARNING,
                "%s: corrupt input packet in stream %d\n", is->url, pkt.stream_index);
-        if (exit_on_error)
-            exit_program(1);
+        if (exit_on_error){
+            //exit_program(1);
+            return -1;
+        }
     }
 
     if (debug_ts) {
@@ -7420,8 +7577,10 @@ int FFmpegMedia::process_input(int file_index)
              * 返回值: 指向pkt中新开辟的边数据的地址. */
             // 在pkt没有该类型的边数据的,则为该类型重新开辟空间,并从ist->st->side_data拷贝数据.
             dst_data = av_packet_new_side_data(&pkt, src_sd->type, src_sd->size);
-            if (!dst_data)
-                exit_program(1);
+            if (!dst_data){
+                //exit_program(1);
+                return -1;
+            }
 
             memcpy(dst_data, src_sd->data, src_sd->size);// 从ist->st->side_data拷贝数据到pkt的side data
         }
@@ -7567,8 +7726,14 @@ int FFmpegMedia::process_input(int file_index)
     // 略,内部一般会因ist2->sub2video.frame为空返回.
     sub2video_heartbeat(ist, pkt.pts);
 
-    // 正常处理pkt的流程.可以看到正常处理是不关心返回值
-    process_input_packet(ist, &pkt, 0);
+    // 正常处理pkt的流程.
+    //process_input_packet(ist, &pkt, 0);// 可以看到ffmpeg本身正常处理是不关心返回值
+    ret = process_input_packet(ist, &pkt, 0);
+    if(ret < 0){
+        av_log(NULL, AV_LOG_FATAL,"normal handle process_input_packet failed.\n");
+        //av_packet_unref(&pkt);// 失败释不释放感觉区别不大
+        return ret;
+    }
 
 discard_packet:
     av_packet_unref(&pkt);
@@ -7630,7 +7795,8 @@ int FFmpegMedia::transcode_step(void)
             if (ret < 0) {
                 av_log(NULL, AV_LOG_ERROR, "Error initializing output stream %d:%d -- %s\n",
                        ost->file_index, ost->index, error);
-                exit_program(1);
+                //exit_program(1);
+                return ret;
             }
         }
         if ((ret = transcode_from_filter(ost->filter->graph, &ist)) < 0)
@@ -8056,7 +8222,7 @@ void FFmpegMedia::print_report(int is_last_report, int64_t timer_start, int64_t 
 /**
  * @brief 将每个输出流的编码器剩余pkt清空.
  */
-void FFmpegMedia::flush_encoders(void)
+int FFmpegMedia::flush_encoders(void)
 {
     int i, ret;
 
@@ -8098,7 +8264,8 @@ void FFmpegMedia::flush_encoders(void)
                 ret = configure_filtergraph(fg);
                 if (ret < 0) {
                     av_log(NULL, AV_LOG_ERROR, "Error configuring filter graph\n");
-                    exit_program(1);
+                    //exit_program(1);
+                    goto fail;
                 }
 
                 // 2.1.4 标记输出流完成编码和复用
@@ -8110,7 +8277,8 @@ void FFmpegMedia::flush_encoders(void)
             if (ret < 0) {
                 av_log(NULL, AV_LOG_ERROR, "Error initializing output stream %d:%d -- %s\n",
                        ost->file_index, ost->index, error);
-                exit_program(1);
+                //exit_program(1);
+                goto fail;
             }
         }//<== if (!ost->initialized) end ==>
 
@@ -8136,7 +8304,8 @@ void FFmpegMedia::flush_encoders(void)
                 desc   = "video";
                 break;
             default:
-                av_assert0(0);
+                /*av_assert0(0);*/
+                return -1;
             }
 
             // 3.1 设置空包
@@ -8155,7 +8324,8 @@ void FFmpegMedia::flush_encoders(void)
                     av_log(NULL, AV_LOG_FATAL, "%s encoding failed: %s\n",
                            desc,
                            av_err2str_ex(str, ret));
-                    exit_program(1);
+                    //exit_program(1);
+                    goto fail;
                 }
             }
 
@@ -8166,7 +8336,8 @@ void FFmpegMedia::flush_encoders(void)
                 av_log(NULL, AV_LOG_FATAL, "%s encoding failed: %s\n",
                        desc,
                        av_err2str_ex(str, ret));
-                exit_program(1);
+                //exit_program(1);
+                goto fail;
             }
             if (ost->logfile && enc->stats_out) {
                 fprintf(ost->logfile, "%s", enc->stats_out);
@@ -8177,7 +8348,7 @@ void FFmpegMedia::flush_encoders(void)
              * 2)正常读到剩余的包: 若输出流已经完成,那么不要该包了,直接释放引用,然后返回处理下一个包;
              *                  若输出流没完成,那么继续 将该包输出到输出url. */
             if (ret == AVERROR_EOF) {
-                output_packet(of, &pkt, ost, 1);
+                output_packet(of, &pkt, ost, 1);// 参4=1,主要是位流处理, 所以这里我们不处理返回值
                 break;//该输出流flush encoder完成,退出for处理下一个输出流
             }
             // 输出流复用完成,丢弃该pkt
@@ -8189,13 +8360,21 @@ void FFmpegMedia::flush_encoders(void)
             // 没有遇到eof或者输出流没完成,那么继续将该包输出到输出url
             av_packet_rescale_ts(&pkt, enc->time_base, ost->mux_timebase);
             pkt_size = pkt.size;
-            output_packet(of, &pkt, ost, 0);
+            ret = output_packet(of, &pkt, ost, 0);
+            if(ret < 0){
+                goto fail;
+            }
             if (ost->enc_ctx->codec_type == AVMEDIA_TYPE_VIDEO && vstats_filename) {
                 do_video_stats(ost, pkt_size);
             }
         }//<== for (;;) end ==>
 
     }//<== for (i = 0; i < nb_output_streams; i++) end ==>
+
+    ret = 0;
+
+fail:
+    return ret;
 }
 
 void FFmpegMedia::term_exit_sigsafe(void)
@@ -8284,14 +8463,23 @@ int FFmpegMedia::transcode(void)
         ist = input_streams[i];
         // 文件没遇到eof.一般在process_input()被置1
         if (!input_files[ist->file_index]->eof_reached) {
-            process_input_packet(ist, NULL, 0);
+            ret = process_input_packet(ist, NULL, 0);
+            if(ret < 0){// tyycode 失败直接返回.
+                av_log(NULL, AV_LOG_FATAL, "process_input_packet(0 transcode) flush NULL pkt failed.\n");
+                return ret;
+            }
         }
     }
 
     // 6. 清空编码器.一般是这里清空编码器,然后写剩余的帧的.
-    flush_encoders();
+    ret = flush_encoders();
+    if(ret < 0){
+        av_log(NULL, AV_LOG_FATAL, "flush_encoders failed.\n");
+        return -1;
+    }
 
-    term_exit();
+    //term_exit();
+    av_log(NULL, AV_LOG_DEBUG, "flush_encoders excute ok.\n");
 
     /* write the trailer if needed and close file */
     // 7. 为每个输出文件调用av_write_trailer().
@@ -8307,8 +8495,10 @@ int FFmpegMedia::transcode(void)
         if ((ret = av_write_trailer(os)) < 0) {
             char str[AV_ERROR_MAX_STRING_SIZE] = {0};
             av_log(NULL, AV_LOG_ERROR, "Error writing trailer of %s: %s\n", os->url, av_err2str_ex(str, ret));
-            if (exit_on_error)
-                exit_program(1);
+            if (exit_on_error){
+                //exit_program(1);
+                return ret;
+            }
         }
     }
 
@@ -8328,7 +8518,8 @@ int FFmpegMedia::transcode(void)
     // 写入的包数为0 且 abort_on_flags 与上 1 的结果不为0, 程序退出.
     if (!total_packets_written && (abort_on_flags & ABORT_ON_FLAG_EMPTY_OUTPUT)) {
         av_log(NULL, AV_LOG_FATAL, "Empty output\n");
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
 
     // 9. 关闭解码器
@@ -8377,6 +8568,7 @@ int FFmpegMedia::transcode(void)
             }
         }
     }
+
     return ret;
 }
 
@@ -8395,7 +8587,7 @@ int FFmpegMedia::start(){
 
 //    if(argc>1 && !strcmp(argv[1], "-d")){
 //        run_as_daemon=1;
-//        av_log_set_callback(log_callback_null);
+//        av_log_set_callback(log_callback_null);// 这样可以避免打日志？
 //        argc--;
 //        argv++;
 //    }
@@ -8409,19 +8601,23 @@ int FFmpegMedia::start(){
 
     /* parse options and open all input/output files */
     ret = ffmpeg_parse_options(argc, argv);
-    if (ret < 0)
-        exit_program(1);
+    if (ret < 0){
+        //exit_program(1);
+        return -1;
+    }
 
     if (nb_output_files <= 0 && nb_input_files == 0) {
         //show_usage();
         av_log(NULL, AV_LOG_WARNING, "Use -h to get full help or, even better, run 'man %s'\n", program_name);
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
 
     /* file converter / grab */
     if (nb_output_files <= 0) {
         av_log(NULL, AV_LOG_FATAL, "At least one output file must be specified\n");
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
 
     for (i = 0; i < nb_output_files; i++) {
@@ -8430,8 +8626,12 @@ int FFmpegMedia::start(){
     }
 
     current_time = ti = get_benchmark_time_stamps();
-    if (transcode() < 0)
-        exit_program(1);
+    if ((ret = transcode()) < 0){
+        av_log(NULL, AV_LOG_FATAL, "transcode() failed, ret: %d.\n", ret);
+        //exit_program(1);
+        return ret;
+    }
+
     if (do_benchmark) {
         int64_t utime, stime, rtime;
         current_time = get_benchmark_time_stamps();
@@ -8442,15 +8642,38 @@ int FFmpegMedia::start(){
                "bench: utime=%0.3fs stime=%0.3fs rtime=%0.3fs\n",
                utime / 1000000.0, stime / 1000000.0, rtime / 1000000.0);
     }
-//    av_log(NULL, AV_LOG_DEBUG, "%"PRIu64" frames successfully decoded, %"PRIu64" decoding errors\n",
-//           decode_error_stat[0], decode_error_stat[1]);
-    if ((decode_error_stat[0] + decode_error_stat[1]) * max_error_rate < decode_error_stat[1])
-        exit_program(69);
+
+    av_log(NULL, AV_LOG_DEBUG, "%" PRIu64" frames successfully decoded, %" PRIu64" decoding errors\n",
+           decode_error_stat[0], decode_error_stat[1]);
+    if ((decode_error_stat[0] + decode_error_stat[1]) * max_error_rate < decode_error_stat[1]){
+        //exit_program(69);
+    }
 
     // 调用ffmpeg_cleanup. 因为上面注册回调是使用ffmpeg_cleanup注册的.
-    exit_program(received_nb_signals ? 255 : main_return_code);
+    //exit_program(received_nb_signals ? 255 : main_return_code);// 让析构去掉
 
     return main_return_code;
+}
+
+int FFmpegMedia::start_async(){
+    int ret = ThreadWrapper::start();
+    if(ret == -1){
+        printf("start_async 线程开启失败\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+void FFmpegMedia::loop(){
+//    while(true){
+//        if(_request_abort){
+//            break;
+//        }
+//    }
+    this->start();
+
+    printf("loop线程函数退出\n");
 }
 
 
@@ -8517,11 +8740,14 @@ void FFmpegMedia::prepare_app_arguments(int *argc_ptr, char ***argv_ptr)
     *argc_ptr = win32_argc;
     *argv_ptr = win32_argv_utf8;
 }
+
 #else
+
 inline void FFmpegMedia::prepare_app_arguments(int *argc_ptr, char ***argv_ptr)
 {
     /* nothing to do */
 }
+
 #endif /* HAVE_COMMANDLINETOARGVW */
 
 void FFmpegMedia::init_opts(){
@@ -8534,9 +8760,9 @@ void FFmpegMedia::init_opts(){
  * @brief 初始化octx
  * @param octx 参数上下文
  * @param groups 全局静态数组groups.
- * @param nb_groups 全局静态数组groups的大小，本版本为2个.
+ * @param nb_groups 全局静态数组groups的大小，本版固定为2个.
 */
-void FFmpegMedia::init_parse_context(OptionParseContext *octx,
+int FFmpegMedia::init_parse_context(OptionParseContext *octx,
                                const OptionGroupDef *groups, int nb_groups)
 {
     static const OptionGroupDef global_group = { "global" };
@@ -8548,8 +8774,10 @@ void FFmpegMedia::init_parse_context(OptionParseContext *octx,
     // 2. 为输入输出文件开辟空间,所以OptionGroupList就代表存储输入输出文件的链表.
     octx->nb_groups = nb_groups;
     octx->groups    = (OptionGroupList *)av_mallocz_array(octx->nb_groups, sizeof(*octx->groups));
-    if (!octx->groups)
-        exit_program(1);
+    if (!octx->groups){
+        //exit_program(1);
+        return -1;
+    }
 
     // 3. 给输入、输出、全局选项赋予OptionGroupDef值.
     for (i = 0; i < octx->nb_groups; i++)
@@ -8560,6 +8788,8 @@ void FFmpegMedia::init_parse_context(OptionParseContext *octx,
 
     // 4. 设置视频转码参数选项.
     init_opts();
+
+    return 0;
 }
 
 /**
@@ -8577,7 +8807,8 @@ void *FFmpegMedia::grow_array(void *array, int elem_size, int *size, int new_siz
     // INT_MAX是最大开辟字节数，elem_size是单个元素占的字节数，故除以后得到最大开辟元素个数.
     if (new_size >= INT_MAX / elem_size) {
         av_log(NULL, AV_LOG_ERROR, "Array too big.\n");
-        exit_program(1);
+        //exit_program(1);
+        return nullptr;
     }
 
     // 2. 若要开辟新内存的大小，小于原来内存的大小，则不做处理，返回原来的数组.
@@ -8589,7 +8820,8 @@ void *FFmpegMedia::grow_array(void *array, int elem_size, int *size, int new_siz
         uint8_t *tmp = (uint8_t *)av_realloc_array(array, new_size, elem_size);
         if (!tmp) {
             av_log(NULL, AV_LOG_ERROR, "Could not alloc buffer.\n");
-            exit_program(1);
+            //exit_program(1);
+            return nullptr;
         }
         // 跳过原来的数据，对重新开辟的内存清零(读者这里看不懂需要补充realloc的相关知识)
         // tmp + *size*elem_size代表跳过原来的数据，(new_size-*size) * elem_size代表在原来数据后面开辟的字节数
@@ -8612,7 +8844,7 @@ void *FFmpegMedia::grow_array(void *array, int elem_size, int *size, int new_siz
  * @param group_idx 0或者1，0:输入文件,1:输出文件.
  * @param arg 文件名.本程序指的文件名可以是文件或者实时流.
  */
-void FFmpegMedia::finish_group(OptionParseContext *octx, int group_idx,
+int FFmpegMedia::finish_group(OptionParseContext *octx, int group_idx,
                          const char *arg)
 {
     OptionGroupList *l = &octx->groups[group_idx];
@@ -8620,7 +8852,11 @@ void FFmpegMedia::finish_group(OptionParseContext *octx, int group_idx,
 
     // 1. 往OptionGroupList中的OptionGroup数组增加一个元素.
     //GROW_ARRAY(l->groups, l->nb_groups);
-    l->groups = (OptionGroup *)grow_array(l->groups, sizeof(*l->groups), &l->nb_groups, l->nb_groups + 1);
+    GROW_ARRAY_EX(l->groups, OptionGroup *, l->nb_groups);
+    //l->groups = (OptionGroup *)grow_array(l->groups, sizeof(*l->groups), &l->nb_groups, l->nb_groups + 1);
+    if(!l->groups){
+        return -1;
+    }
     g = &l->groups[l->nb_groups - 1];// 获取新增的元素,用于临时操作.
 
     // 2. 赋值.
@@ -8642,6 +8878,8 @@ void FFmpegMedia::finish_group(OptionParseContext *octx, int group_idx,
 
     // 3. 清空本次的cur_group.
     memset(&octx->cur_group, 0, sizeof(octx->cur_group));
+
+    return 0;
 }
 
 /*
@@ -8702,7 +8940,7 @@ const OptionDef *FFmpegMedia::find_option(const OptionDef *po, const char *name)
  * @param key 用户传进的key,不带"-"
  * @param val 用户或者ffmpeg添加的值
  */
-void FFmpegMedia::add_opt(OptionParseContext *octx, const OptionDef *opt,
+int FFmpegMedia::add_opt(OptionParseContext *octx, const OptionDef *opt,
                     const char *key, const char *val)
 {
     // 1. 判断该选项opt是否是全局,是g则指向全局选项,不是则指向临时选项.
@@ -8717,10 +8955,17 @@ void FFmpegMedia::add_opt(OptionParseContext *octx, const OptionDef *opt,
     // 2. 往全局或者临时选项内的Option数组新增一个元素，g->nb_opts自动加1.
     // 然后赋值，opt是ffmpeg官方定义的元素说明.key是用户的key，val是用户或者ffmpeg添加的值.
     //GROW_ARRAY(g->opts, g->nb_opts);
-    g->opts = (Option *)grow_array(g->opts, sizeof(*g->opts), &g->nb_opts, g->nb_opts + 1);
+    GROW_ARRAY_EX(g->opts, Option *, g->nb_opts);
+    //g->opts = (Option *)grow_array(g->opts, sizeof(*g->opts), &g->nb_opts, g->nb_opts + 1);
+    if(!g->opts){
+        return -1;
+    }
+
     g->opts[g->nb_opts - 1].opt = opt;
     g->opts[g->nb_opts - 1].key = key;
     g->opts[g->nb_opts - 1].val = val;
+
+    return 0;
 }
 
 const AVOption *FFmpegMedia::opt_find(void *obj, const char *name, const char *unit,
@@ -8778,8 +9023,9 @@ double FFmpegMedia::parse_number_or_die(const char *context, const char *numstr,
         error = "Expected int for %s but found %s\n";
     else
         return d;
+
     av_log(NULL, AV_LOG_FATAL, error, context, numstr, min, max);
-    exit_program(1);
+    //exit_program(1);
     return 0;
 }
 
@@ -8790,7 +9036,8 @@ int64_t FFmpegMedia::parse_time_or_die(const char *context, const char *timestr,
     if (av_parse_time(&us, timestr, is_duration) < 0) {
         av_log(NULL, AV_LOG_FATAL, "Invalid %s specification for %s: %s\n",
                is_duration ? "duration" : "date", context, timestr);
-        exit_program(1);
+        //exit_program(1);
+        return -1;// 注意: 解析时间被我改成默认返回-1.
     }
     return us;
 }
@@ -8814,7 +9061,7 @@ int FFmpegMedia::write_option(void *optctx, const OptionDef *po, const char *opt
     int *dstcount;//如果数据是SpecifierOpt *类型，对应的存入链表成员个数的变量地址,例如int nb_codec_names，返回的是&nb_codec_names
 
     // 2. 判断得到的成员dts的类型.即dst在OptionsContext中对应为SpecifierOpt类型的变量
-    // 看这里必须printf打印出来，因为qt debug时可能显示的值不正确.
+    // 看这里必须printf打印出来，因为qt debug时可能显示的值不正确!!!
     if (po->flags & OPT_SPEC) {
         SpecifierOpt **so = (SpecifierOpt **)dst;// 用临时的二级指针变量指向dst，方便操作，且因为dst是void*，不方便直接操作内部成员.
                                 // 注：dst是指向成员的内存地址，所以so此时也是指向成员地址，这点非常重要.
@@ -8877,8 +9124,11 @@ int FFmpegMedia::write_option(void *optctx, const OptionDef *po, const char *opt
             return ret;
         }
     }
-    if (po->flags & OPT_EXIT)
-        exit_program(0);
+
+    if (po->flags & OPT_EXIT){
+        av_log(NULL, AV_LOG_WARNING, "OPT_EXIT is invaild\n");
+        //exit_program(0);
+    }
 
     return 0;
 }
@@ -9053,7 +9303,11 @@ int FFmpegMedia::split_commandline(OptionParseContext *octx, int argc, char *arg
     prepare_app_arguments(&argc, &argv);
 
     // 2. 初始化octx
-    init_parse_context(octx, groups, nb_groups);
+    int ret = init_parse_context(octx, groups, nb_groups);
+    if(ret < 0){
+        return -1;
+    }
+
     av_log(NULL, AV_LOG_DEBUG, "Splitting the commandline.\n");
 
     while (optindex < argc) {// 这里说明执行的命令至少要有一个参数才能进来.例如ffmpeg.exe表示只有程序名而无参数,这里不会进来
@@ -9072,7 +9326,10 @@ int FFmpegMedia::split_commandline(OptionParseContext *octx, int argc, char *arg
         // 3. 处理输出文件
         /* unnamed group separators, e.g. output filename */
         if (opt[0] != '-' || !opt[1] || dashdash+1 == optindex) {
-            finish_group(octx, 0, opt);
+            ret = finish_group(octx, 0, opt);
+            if(ret < 0){
+                return -1;
+            }
             av_log(NULL, AV_LOG_DEBUG, " matched as %s.\n", groups[0].name);
             continue;
         }
@@ -9093,7 +9350,10 @@ do {                                                                           \
         /* named group separators, e.g. -i */
         if ((ret = match_group_separator(groups, nb_groups, opt)) >= 0) {
             GET_ARG(arg);
-            finish_group(octx, ret, arg);// 完成一个组的参数处理.
+            ret = finish_group(octx, ret, arg);// 完成一个组的参数处理.
+            if(ret < 0){
+                return -1;
+            }
             av_log(NULL, AV_LOG_DEBUG, " matched as %s with argument '%s'.\n",
                    groups[ret].name, arg);
             continue;
@@ -9114,7 +9374,10 @@ do {                                                                           \
                 arg = "1";// key不带val的，走这个流程
             }
 
-            add_opt(octx, po, opt, arg);
+            ret = add_opt(octx, po, opt, arg);
+            if(ret < 0){
+                return -1;
+            }
             av_log(NULL, AV_LOG_DEBUG, " matched as option '%s' (%s) with "
                    "argument '%s'.\n", po->name, po->help, arg);
             continue;
@@ -9187,7 +9450,8 @@ int FFmpegMedia::opt_map(void *optctx, const char *opt, const char *arg)
         sync_file_idx = strtol(sync + 1, &sync, 0);
         if (sync_file_idx >= nb_input_files || sync_file_idx < 0) {
             av_log(NULL, AV_LOG_FATAL, "Invalid sync file index: %d.\n", sync_file_idx);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
         if (*sync)
             sync++;
@@ -9200,12 +9464,14 @@ int FFmpegMedia::opt_map(void *optctx, const char *opt, const char *arg)
         if (i == input_files[sync_file_idx]->nb_streams) {
             av_log(NULL, AV_LOG_FATAL, "Sync stream specification in map %s does not "
                                        "match any streams.\n", arg);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
         if (input_streams[input_files[sync_file_idx]->ist_index + sync_stream_idx]->user_set_discard == AVDISCARD_ALL) {
             av_log(NULL, AV_LOG_FATAL, "Sync stream specification in map %s matches a disabled input "
                                        "stream.\n", arg);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
     }
 
@@ -9219,7 +9485,8 @@ int FFmpegMedia::opt_map(void *optctx, const char *opt, const char *arg)
         m->linklabel = av_get_token(&c, "]");
         if (!m->linklabel) {
             av_log(NULL, AV_LOG_ERROR, "Invalid output link label: %s.\n", map);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
     } else {
         if (allow_unused = strchr(map, '?'))
@@ -9227,7 +9494,8 @@ int FFmpegMedia::opt_map(void *optctx, const char *opt, const char *arg)
         file_idx = strtol(map, &p, 0);
         if (file_idx >= nb_input_files || file_idx < 0) {
             av_log(NULL, AV_LOG_FATAL, "Invalid input file index: %d.\n", file_idx);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
         if (negative)
             /* disable some already defined maps */
@@ -9271,11 +9539,13 @@ int FFmpegMedia::opt_map(void *optctx, const char *opt, const char *arg)
         } else if (disabled) {
             av_log(NULL, AV_LOG_FATAL, "Stream map '%s' matches disabled streams.\n"
                                        "To ignore this, add a trailing '?' to the map.\n", arg);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         } else {
             av_log(NULL, AV_LOG_FATAL, "Stream map '%s' matches no streams.\n"
                                        "To ignore this, add a trailing '?' to the map.\n", arg);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
     }
 
@@ -9317,7 +9587,8 @@ int FFmpegMedia::opt_map_channel(void *optctx, const char *opt, const char *arg)
     if (n != 3 && n != 5) {
         av_log(NULL, AV_LOG_FATAL, "Syntax error, mapchan usage: "
                "[file.stream.channel|-1][:syncfile:syncstream]\n");
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
 
     if (n != 5) // only file.stream.channel specified
@@ -9327,19 +9598,22 @@ int FFmpegMedia::opt_map_channel(void *optctx, const char *opt, const char *arg)
     if (m->file_idx < 0 || m->file_idx >= nb_input_files) {
         av_log(NULL, AV_LOG_FATAL, "mapchan: invalid input file index: %d\n",
                m->file_idx);
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
     if (m->stream_idx < 0 ||
         m->stream_idx >= input_files[m->file_idx]->nb_streams) {
         av_log(NULL, AV_LOG_FATAL, "mapchan: invalid input file stream index #%d.%d\n",
                m->file_idx, m->stream_idx);
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
     st = input_files[m->file_idx]->ctx->streams[m->stream_idx];
     if (st->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) {
         av_log(NULL, AV_LOG_FATAL, "mapchan: stream #%d.%d is not an audio stream.\n",
                m->file_idx, m->stream_idx);
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
     /* allow trailing ? to map_channel */
     if (allow_unused = strchr(mapchan, '?'))
@@ -9353,7 +9627,8 @@ int FFmpegMedia::opt_map_channel(void *optctx, const char *opt, const char *arg)
             av_log(NULL, AV_LOG_FATAL,  "mapchan: invalid audio channel #%d.%d.%d\n"
                     "To ignore this, add a trailing '?' to the map_channel.\n",
                     m->file_idx, m->stream_idx, m->channel_idx);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
 
     }
@@ -9485,7 +9760,8 @@ int FFmpegMedia::opt_target(void *optctx, const char *opt, const char *arg)
         av_log(NULL, AV_LOG_FATAL, "Could not determine norm (PAL/NTSC/NTSC-Film) for target.\n");
         av_log(NULL, AV_LOG_FATAL, "Please prefix target with \"pal-\", \"ntsc-\" or \"film-\",\n");
         av_log(NULL, AV_LOG_FATAL, "or set a framerate with \"-r xxx\".\n");
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
 
     if (!strcmp(arg, "vcd")) {
@@ -9750,7 +10026,8 @@ int FFmpegMedia::opt_vstats(void *optctx, const char *opt, const char *arg)
 
     if (!today) { // maybe tomorrow
         av_log(NULL, AV_LOG_FATAL, "Unable to get current time: %s\n", strerror(errno));
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
 
     snprintf(filename, sizeof(filename), "vstats_%02d%02d%02d.log", today->tm_hour, today->tm_min,
@@ -9818,7 +10095,8 @@ int FFmpegMedia::opt_streamid(void *optctx, const char *opt, const char *arg)
         av_log(NULL, AV_LOG_FATAL,
                "Invalid value '%s' for option '%s', required syntax is 'index:value'\n",
                arg, opt);
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
     *p++ = '\0';
     idx = parse_number_or_die(opt, idx_str, OPT_INT, 0, MAX_STREAMS-1);
@@ -9957,7 +10235,8 @@ int FFmpegMedia::opt_preset(void *optctx, const char *opt, const char *arg)
             av_log(NULL, AV_LOG_FATAL, "Please use -preset <speed> -qp 0\n");
         }else
             av_log(NULL, AV_LOG_FATAL, "File for preset '%s' not found\n", arg);
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
 
     while (fgets(line, sizeof(line), f)) {
@@ -9969,7 +10248,8 @@ int FFmpegMedia::opt_preset(void *optctx, const char *opt, const char *arg)
         if (!av_strtok(key,   "=",    &value) ||
             !av_strtok(value, "\r\n", &endptr)) {
             av_log(NULL, AV_LOG_FATAL, "%s: Invalid syntax: '%s'\n", filename, line);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
         av_log(NULL, AV_LOG_DEBUG, "ffpreset[%s]: set '%s' = '%s'\n", filename, key, value);
 
@@ -9980,7 +10260,8 @@ int FFmpegMedia::opt_preset(void *optctx, const char *opt, const char *arg)
         else if (opt_default_new(o, key, value) < 0) {
             av_log(NULL, AV_LOG_FATAL, "%s: Invalid option or argument: '%s', parsed as '%s' = '%s'\n",
                    filename, line, key, value);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
     }
 
@@ -9998,7 +10279,8 @@ int FFmpegMedia::opt_init_hw_device(void *optctx, const char *opt, const char *a
                AV_HWDEVICE_TYPE_NONE)
             printf("%s\n", av_hwdevice_get_type_name(type));
         printf("\n");
-        exit_program(0);
+        //exit_program(0);
+        return -1;
     } else {
         return hw_device_init_from_string(arg, NULL);
     }
@@ -10229,7 +10511,7 @@ void FFmpegMedia::memset_zero_fm(){
     memset((void*)&current_time, 0, sizeof(BenchmarkTimeStamps));
 
     //decode_error_stat[2];// 记录解码的状态.下标0记录的是成功解码的参数,下标1是失败的次数.
-    main_return_code = 0;
+    main_return_code = 0;//
     received_nb_signals = 0;
     //program_name[24] = "ffmpeg";
 
@@ -11167,6 +11449,18 @@ void FFmpegMedia::uninit_options(OptionsContext *o)
     av_freep(&o->attachments);
 }
 
+int FFmpegMedia::init_complex_filters(void)
+{
+    int i, ret = 0;
+
+    for (i = 0; i < nb_filtergraphs; i++) {
+        ret = init_complex_filtergraph(filtergraphs[i]);
+        if (ret < 0)
+            return ret;
+    }
+    return 0;
+}
+
 AVCodec *FFmpegMedia::find_codec_or_die(const char *name, enum AVMediaType type, int encoder){
     const AVCodecDescriptor *desc;
     const char *codec_string = encoder ? "encoder" : "decoder";
@@ -11188,7 +11482,8 @@ AVCodec *FFmpegMedia::find_codec_or_die(const char *name, enum AVMediaType type,
 
     if (!codec) {
         av_log(NULL, AV_LOG_FATAL, "Unknown %s '%s'\n", codec_string, name);
-        exit_program(1);
+        //exit_program(1);
+        return nullptr;
     }
 
     // 3. 对比.根据用户传进的名字找到的编解码器的媒体类型，若与用户传进的不一致，退出程序.
@@ -11197,7 +11492,8 @@ AVCodec *FFmpegMedia::find_codec_or_die(const char *name, enum AVMediaType type,
     // codec->type是通过用户输入的名字找到的编解码器名字的类型
     if (codec->type != type) {
         av_log(NULL, AV_LOG_FATAL, "Invalid %s type '%s'\n", codec_string, name);
-        exit_program(1);
+        //exit_program(1);
+        return nullptr;
     }
     return codec;
 }
@@ -11224,14 +11520,10 @@ void FFmpegMedia::assert_avoptions(AVDictionary *m)
     AVDictionaryEntry *t;
     if ((t = av_dict_get(m, "", NULL, AV_DICT_IGNORE_SUFFIX))) {
         av_log(NULL, AV_LOG_FATAL, "Option %s not found.\n", t->key);
-        exit_program(1);
+        //exit_program(1);// 不退出而忽略该选项
     }
 }
 
-
-// ret = open_files(&octx.groups[GROUP_INFILE], "input", open_input_file);
-//int FFmpegMedia::open_files(OptionGroupList *l, const char *inout,
-//                      int (*open_file)(OptionsContext*, const char*))
 int FFmpegMedia::open_files(OptionGroupList *l, const char *inout,
                       int (*open_file)(void*, OptionsContext*, const char*))
 {
@@ -11266,6 +11558,8 @@ int FFmpegMedia::open_files(OptionGroupList *l, const char *inout,
 
         av_log(NULL, AV_LOG_DEBUG, "Opening an %s file: %s.\n", inout, g->arg);
         //ret = open_file(&o, g->arg);
+
+        // 当存在多个输入输出文件时,这样做可能不合理,但对于一输入对一输出的场景是ok的.
         std::string lowstr = inout;
         if(strlwr((char*)lowstr.c_str()) == std::string("input")){
             //_input_filename = g->arg;
@@ -11274,7 +11568,6 @@ int FFmpegMedia::open_files(OptionGroupList *l, const char *inout,
             ret = open_file((void*)this, &o, _output_filename.c_str());
         }
 
-//        ret = open_file((void*)this, &o, g->arg);
         uninit_options(&o);
         if (ret < 0) {
             av_log(NULL, AV_LOG_ERROR, "Error opening %s file %s.\n",
@@ -11303,6 +11596,10 @@ AVCodec *FFmpegMedia::choose_decoder(OptionsContext *o, AVFormatContext *s, AVSt
     MATCH_PER_STREAM_OPT_EX(codec_names, str, codec_name, char*, s, st);
     if (codec_name) {
         AVCodec *codec = find_codec_or_die(codec_name, st->codecpar->codec_type, 0);// 判断解码器是否被ffmpeg支持.例如-vcodec libx264,这里是判断 libx264是否被ffmpeg支持
+        if(!codec){
+            return nullptr;
+        }
+
         st->codecpar->codec_id = codec->id;
         return codec;
     } else
@@ -11411,9 +11708,15 @@ AVDictionary *FFmpegMedia::filter_codec_opts(AVDictionary *opts, enum AVCodecID 
         /* check stream specification in opt name */
         if (p)
             switch (check_stream_specifier(s, st, p + 1)) {
-            case  1: *p = 0; printf("p: %s\n", p);break;
-            case  0:         continue;
-            default:         exit_program(1);
+            case  1:
+                *p = 0;
+                printf("p: %s\n", p);
+                break;
+            case  0:
+                continue;
+            default:
+                //exit_program(1);
+                return nullptr;// 成功也可能返回空,所以这里后续可能需要根据业务场景优化
             }
 
         /*2.2 设置选项到ret字典，通常选项走这个if*/
@@ -11486,7 +11789,7 @@ AVDictionary **FFmpegMedia::setup_find_stream_info_opts(AVFormatContext *s,
 /* Add all the streams from the given input file to the global
  * list of input streams. */
 // 该函数实际上是对输入流中解码器相关参数的处理，然后封装到InputStream结构体中
-void FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
+int FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
 {
     int i, ret;
 
@@ -11503,13 +11806,17 @@ void FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
         const AVClass *cc = avcodec_get_class();// 获取AVCodecContext的AVClass
         const AVOption *discard_opt = av_opt_find(&cc, "skip_frame", NULL, 0, 0);
 
-        if (!ist)
-            exit_program(1);
+        if (!ist){
+            //exit_program(1);
+            return -1;
+        }
 
         // 1. 往二维数组input_streams**增加一个input_streams*元素
         //GROW_ARRAY(input_streams, nb_input_streams);//注：这里只是开辟了InputStream *字节大小(64bit为8字节)，而不是开辟InputStream字节大小(sizeof(InputStream))
         GROW_ARRAY_EX(input_streams, InputStream **, nb_input_streams);
-        //input_streams = (InputStream **)grow_array(input_streams, sizeof(*input_streams), &nb_input_streams, nb_input_streams + 1)
+        if(!input_streams){
+            return -1;
+        }
         input_streams[nb_input_streams - 1] = ist;
 
         // 2. 利用o对InputStream内部进行赋值或者直接赋默认值
@@ -11539,9 +11846,12 @@ void FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
 
         // 3. 保存解码器
         ist->dec = choose_decoder(o, ic, st);
+        if(!ist->dec){
+            av_log(NULL, AV_LOG_ERROR, "choose_decoder is null.\n");
+            return -1;
+        }
 
         // 4. 保存解码器选项。将o->g->codec_opts保存的解码器选项通过返回值设置到decoder_opts中。
-        /*这里看到，每个流都保存了一份o->g->codec_opts*/
         ist->decoder_opts = filter_codec_opts(o->g->codec_opts, ist->st->codecpar->codec_id, ic, st, ist->dec);
 
         ist->reinit_filters = -1;
@@ -11557,12 +11867,14 @@ void FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
             (o->audio_disable && ist->st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) ||
             (o->subtitle_disable && ist->st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) ||
             (o->data_disable && ist->st->codecpar->codec_type == AVMEDIA_TYPE_DATA))
-                ist->user_set_discard = AVDISCARD_ALL;/*设置了AVDISCARD_ALL，表示用户丢弃该流*/
-        /*检测ffmpeg设置后user_set_discard的值是否与用户的一致，不一致则程序退出*/
+                ist->user_set_discard = AVDISCARD_ALL;/* 设置了AVDISCARD_ALL，表示用户丢弃该流 */
+
+        /* 检测ffmpeg设置后,user_set_discard的值是否与用户的一致，不一致则程序退出 */
         if (discard_str && av_opt_eval_int(&cc, discard_opt, discard_str, &ist->user_set_discard) < 0) {
             av_log(NULL, AV_LOG_ERROR, "Error parsing discard %s.\n",
                     discard_str);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
 
         ist->filter_in_rescale_delta_last = AV_NOPTS_VALUE;
@@ -11571,14 +11883,16 @@ void FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
         ist->dec_ctx = avcodec_alloc_context3(ist->dec);
         if (!ist->dec_ctx) {
             av_log(NULL, AV_LOG_ERROR, "Error allocating the decoder context.\n");
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
 
         // 7. 从流中拷贝参数到解码器上下文
         ret = avcodec_parameters_to_context(ist->dec_ctx, par);
         if (ret < 0) {
             av_log(NULL, AV_LOG_ERROR, "Error initializing the decoder context.\n");
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
 
         if (o->bitexact)
@@ -11609,7 +11923,8 @@ void FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
                                                  framerate) < 0) {
                 av_log(NULL, AV_LOG_ERROR, "Error parsing framerate %s.\n",
                        framerate);
-                exit_program(1);
+                //exit_program(1);
+                return -1;
             }
 
             ist->top_field_first = -1;
@@ -11670,7 +11985,8 @@ void FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
                         for (i = 0; hwaccels[i].name; i++)
                             av_log(NULL, AV_LOG_FATAL, "%s ", hwaccels[i].name);
                         av_log(NULL, AV_LOG_FATAL, "\n");
-                        exit_program(1);
+                        //exit_program(1);
+                        return -1;
                     }
                 }
             }//<== if (hwaccel) end ==>
@@ -11680,8 +11996,11 @@ void FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
             MATCH_PER_STREAM_OPT_EX(hwaccel_devices, str, hwaccel_device, char *, ic, st);
             if (hwaccel_device) {
                 ist->hwaccel_device = av_strdup(hwaccel_device);
-                if (!ist->hwaccel_device)
-                    exit_program(1);
+                if (!ist->hwaccel_device){
+                    //exit_program(1);
+                    return -1;
+                }
+
             }
 
             //MATCH_PER_STREAM_OPT(hwaccel_output_formats, str,
@@ -11718,7 +12037,8 @@ void FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
             if (canvas_size &&
                 av_parse_video_size(&ist->dec_ctx->width, &ist->dec_ctx->height, canvas_size) < 0) {
                 av_log(NULL, AV_LOG_FATAL, "Invalid canvas size: %s.\n", canvas_size);
-                exit_program(1);
+                //exit_program(1);
+                return -1;
             }
             break;
         }
@@ -11726,7 +12046,8 @@ void FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
         case AVMEDIA_TYPE_UNKNOWN:
             break;
         default:
-            abort();
+            //abort();
+            return -1;
         }//<== switch (par->codec_type) end ==>
 
         // 上面看到，一开始是使用avcodec_parameters_to_context(ist->dec_ctx, par)将流中
@@ -11736,7 +12057,8 @@ void FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
         ret = avcodec_parameters_from_context(par, ist->dec_ctx);
         if (ret < 0) {
             av_log(NULL, AV_LOG_ERROR, "Error initializing the decoder context.\n");
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
     }//<== for (i = 0; i < ic->nb_streams; i++) { end ==>
 }
@@ -11803,7 +12125,8 @@ int FFmpegMedia::open_input_file(OptionsContext *o, const char *filename)
         int64_t start_time = o->start_time == AV_NOPTS_VALUE ? 0 : o->start_time;
         if (o->stop_time <= start_time) {
             av_log(NULL, AV_LOG_ERROR, "-to value smaller than -ss; aborting.\n");
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         } else {
             o->recording_time = o->stop_time - start_time;
         }
@@ -11813,7 +12136,8 @@ int FFmpegMedia::open_input_file(OptionsContext *o, const char *filename)
     if (o->format) {
         if (!(file_iformat = av_find_input_format(o->format))) {
             av_log(NULL, AV_LOG_FATAL, "Unknown input format: '%s'\n", o->format);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
     }
 
@@ -11836,7 +12160,8 @@ int FFmpegMedia::open_input_file(OptionsContext *o, const char *filename)
     ic = avformat_alloc_context();
     if (!ic) {
         print_error(filename, AVERROR(ENOMEM));
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
 
     // 1.1 解复用相关参数设置(不过平时输入文件很少设置过多的参数,输出文件才会)
@@ -11896,14 +12221,30 @@ int FFmpegMedia::open_input_file(OptionsContext *o, const char *filename)
     */
     // 2. 根据用户输入指定的编解码器格式，寻找对应的编解码器
     // 找到则赋值给解复用结构体ic，找不到会在find_codec_or_die直接退出
-    if (video_codec_name)
+    if (video_codec_name){
         ic->video_codec    = find_codec_or_die(video_codec_name   , AVMEDIA_TYPE_VIDEO   , 0);
-    if (audio_codec_name)
+        if(!ic->video_codec){
+            return -1;
+        }
+    }
+    if (audio_codec_name){
         ic->audio_codec    = find_codec_or_die(audio_codec_name   , AVMEDIA_TYPE_AUDIO   , 0);
-    if (subtitle_codec_name)
+        if(!ic->audio_codec){
+            return -1;
+        }
+    }
+    if (subtitle_codec_name){
         ic->subtitle_codec = find_codec_or_die(subtitle_codec_name, AVMEDIA_TYPE_SUBTITLE, 0);
-    if (data_codec_name)
+        if(!ic->subtitle_codec){
+            return -1;
+        }
+    }
+    if (data_codec_name){
         ic->data_codec     = find_codec_or_die(data_codec_name    , AVMEDIA_TYPE_DATA    , 0);
+        if(!ic->data_codec){
+            return -1;
+        }
+    }
 
     // 来到这说明成功找到编解码器(因为失败会在find_codec_or_die直接退出出现)
     // 3. 若指定输入文件的编解码器，则将编解码器中的id赋值给解复用的id; 若无指定，解码器的id为xxx_ID_NONE
@@ -11934,8 +12275,17 @@ int FFmpegMedia::open_input_file(OptionsContext *o, const char *filename)
         print_error(filename, err);
         if (err == AVERROR_PROTOCOL_NOT_FOUND)
             av_log(NULL, AV_LOG_ERROR, "Did you mean file:%s?\n", filename);
-        exit_program(1);
+
+        FMMessage *fmmsg = new FMMessage();
+        fmmsg->what = FM_MSG_OPEN_INPUT_FAILED;
+        fmmsg->ifilename = _input_filename;
+        fmmsg->ofilename = _output_filename;
+        _msg_queue->push(fmmsg);
+
+        //exit_program(1);
+        return -1;
     }
+
     // 打开输入文件后，将该选项置空
     if (scan_all_pmts_set)
         av_dict_set(&o->g->format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE);
@@ -11945,8 +12295,13 @@ int FFmpegMedia::open_input_file(OptionsContext *o, const char *filename)
 
     // 5. 若用户设置解码器，会查找解码器，并把找到解码器的id赋值到streams中
     /* apply forced codec ids */
-    for (i = 0; i < ic->nb_streams; i++)
-        choose_decoder(o, ic, ic->streams[i]);
+    for (i = 0; i < ic->nb_streams; i++){
+        auto codec = choose_decoder(o, ic, ic->streams[i]);
+        if(!codec){
+            av_log(NULL, AV_LOG_ERROR, "choose_decoder failed, %s\n", filename);
+            return -1;
+        }
+    }
 
     // 6. 是否查找流信息.
     if (find_stream_info) {
@@ -11969,7 +12324,13 @@ int FFmpegMedia::open_input_file(OptionsContext *o, const char *filename)
             av_log(NULL, AV_LOG_FATAL, "%s: could not find codec parameters\n", filename);
             if (ic->nb_streams == 0) {
                 avformat_close_input(&ic);
-                exit_program(1);
+                FMMessage *fmmsg = new FMMessage();
+                fmmsg->what = FM_MSG_FIND_STREAM_INFO_FAILED;
+                fmmsg->ifilename = _input_filename;
+                fmmsg->ofilename = _output_filename;
+                _msg_queue->push(fmmsg);
+                //exit_program(1);
+                return -1;
             }
         }
     }
@@ -11983,7 +12344,8 @@ int FFmpegMedia::open_input_file(OptionsContext *o, const char *filename)
     if (o->start_time_eof != AV_NOPTS_VALUE) {
         if (o->start_time_eof >= 0) {
             av_log(NULL, AV_LOG_ERROR, "-sseof value must be negative; aborting\n");
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
         if (ic->duration > 0) {
             o->start_time = o->start_time_eof + ic->duration;
@@ -12030,7 +12392,11 @@ int FFmpegMedia::open_input_file(OptionsContext *o, const char *filename)
     // 7. 将输入文件的每个流封装到InputStream中。InputStream->st是直接指向输入文件的AVStream的，不会再开辟内存.
     // 执行完该函数后，输入文件中各个流就会被保存到input_streams**这个二维数组
     // (ic->streams[]与input_streams都保存这输入文件的各个输入流)
-    add_input_streams(o, ic);
+    ret = add_input_streams(o, ic);
+    if(ret < 0){
+        av_log(NULL, AV_LOG_ERROR, "add_input_streams failed.\n");
+        return -1;
+    }
 
     /* dump the file content */
     // 参4：0-代表dump输入文件，1-代表dump输出文件。可以看源码.
@@ -12039,10 +12405,16 @@ int FFmpegMedia::open_input_file(OptionsContext *o, const char *filename)
     /*8.对InputFile内剩余成员的相关初始化工作*/
     //int tyysize = sizeof (*input_files);//8
     //GROW_ARRAY(input_files, nb_input_files);// 开辟sizeof(InputFile*)大小的内存，且输入文件个数+1
-    input_files = (InputFile **)grow_array(input_files, sizeof(*input_files), &nb_input_files, nb_input_files + 1);
+    GROW_ARRAY_EX(input_files, InputFile **, nb_input_files);
+    //input_files = (InputFile **)grow_array(input_files, sizeof(*input_files), &nb_input_files, nb_input_files + 1);
+    if(!input_files){
+        return -1;
+    }
     f = (InputFile *)av_mallocz(sizeof(*f));// 真正开辟InputFile结构体的内存
-    if (!f)
-        exit_program(1);
+    if (!f){
+        //exit_program(1);
+        return -1;
+    }
     input_files[nb_input_files - 1] = f;
 
     // 下面就是给InputFile结构体赋值
@@ -12101,7 +12473,8 @@ int FFmpegMedia::open_input_file(OptionsContext *o, const char *filename)
                    "input file #%d (%s) is not a decoding option.\n", e->key,
                    option->help ? option->help : "", nb_input_files - 1,
                    filename);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
 
         av_log(NULL, AV_LOG_WARNING, "Codec AVOption %s (%s) specified for "
@@ -12116,12 +12489,14 @@ int FFmpegMedia::open_input_file(OptionsContext *o, const char *filename)
     //对应参数"dump_attachment"
     for (i = 0; i < o->nb_dump_attachment; i++) {
         int j;
-
         for (j = 0; j < ic->nb_streams; j++) {
             AVStream *st = ic->streams[j];
-
-            if (check_stream_specifier(ic, st, o->dump_attachment[i].specifier) == 1)
-                dump_attachment(st, (const char *)o->dump_attachment[i].u.str);
+            if (check_stream_specifier(ic, st, o->dump_attachment[i].specifier) == 1){
+                ret = dump_attachment(st, (const char *)o->dump_attachment[i].u.str);
+                if(ret < 0){
+                    return -1;
+                }
+            }
         }
     }
 
@@ -12185,7 +12560,7 @@ int FFmpegMedia::read_yesno(void)
  *          用avio_open2完成的。
  * 并且注意，重写是指输出文件，而不是输入文件。
 */
-void FFmpegMedia::assert_file_overwrite(const char *filename)
+int FFmpegMedia::assert_file_overwrite(const char *filename)
 {
     // 1. 获取协议名字，例如rtmp://xxx，那么proto_name="rtmp"
     const char *proto_name = avio_find_protocol_name(filename);
@@ -12193,7 +12568,8 @@ void FFmpegMedia::assert_file_overwrite(const char *filename)
     // 2. -y以及-n都提供，程序退出
     if (file_overwrite && no_file_overwrite) {
         fprintf(stderr, "Error, both -y and -n supplied. Exiting.\n");
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
 
     /* 3.若没指定-y且-n也没指定，那么会使用avio_check判断该文件是否存在，若存在会在终端询问用户是否重写，
@@ -12220,13 +12596,15 @@ void FFmpegMedia::assert_file_overwrite(const char *filename)
                 signal(SIGINT, SIG_DFL);
                 if (!read_yesno()) {/*返回0不重写文件；1重写*/
                     av_log(NULL, AV_LOG_FATAL, "Not overwriting - exiting\n");
-                    exit_program(1);
+                    //exit_program(1);
+                    return -1;
                 }
                 //term_init();// 该函数很简单，就是注册相关信号回调函数
             }
             else {
                 av_log(NULL, AV_LOG_FATAL, "File '%s' already exists. Exiting.\n", filename);
-                exit_program(1);
+                //exit_program(1);
+                return -1;
             }
         }
     }
@@ -12245,13 +12623,14 @@ void FFmpegMedia::assert_file_overwrite(const char *filename)
              if (!strcmp(filename, file->ctx->url)) {/*判断输出文件名与输入上下文保存的文件名(输入的文件名)是否一致*/
                  av_log(NULL, AV_LOG_FATAL, "Output %s same as Input #%d - exiting\n", filename, i);
                  av_log(NULL, AV_LOG_WARNING, "FFmpeg cannot edit existing files in-place.\n");
-                 exit_program(1);
+                 //exit_program(1);
+                 return -1;
              }
         }
     }
 }
 
-void FFmpegMedia::dump_attachment(AVStream *st, const char *filename)
+int FFmpegMedia::dump_attachment(AVStream *st, const char *filename)
 {
     int ret;
     AVIOContext *out = NULL;
@@ -12260,24 +12639,31 @@ void FFmpegMedia::dump_attachment(AVStream *st, const char *filename)
     if (!st->codecpar->extradata_size) {
         av_log(NULL, AV_LOG_WARNING, "No extradata to dump in stream #%d:%d.\n",
                nb_input_files - 1, st->index);
-        return;
+        return -1;
     }
     if (!*filename && (e = av_dict_get(st->metadata, "filename", NULL, 0)))
         filename = e->value;
     if (!*filename) {
         av_log(NULL, AV_LOG_FATAL, "No filename specified and no 'filename' tag"
                "in stream #%d:%d.\n", nb_input_files - 1, st->index);
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
 
-    assert_file_overwrite(filename);
+    ret = assert_file_overwrite(filename);
+    if(ret < 0){
+        av_log(NULL, AV_LOG_FATAL, "assert_file_overwrite failed\n");
+        return -1;
+    }
 
     if ((ret = avio_open2(&out, filename, AVIO_FLAG_WRITE, &int_cb, NULL)) < 0) {
         av_log(NULL, AV_LOG_FATAL, "Could not open file %s for writing.\n",
                filename);
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
 
+    // 写sps pps
     avio_write(out, st->codecpar->extradata, st->codecpar->extradata_size);
     avio_flush(out);
     avio_close(out);
@@ -12320,6 +12706,9 @@ int FFmpegMedia::choose_encoder(OptionsContext *o, AVFormatContext *s, OutputStr
         else {
             /*2.3指定编解码器，则使用find_codec_or_die查找，找不到会直接退出程序*/
             ost->enc = find_codec_or_die(codec_name, ost->st->codecpar->codec_type, 1);
+            if(!ost->enc){
+                return -1;
+            }
             ost->st->codecpar->codec_id = ost->enc->id;
         }
         ost->encoding_needed = !ost->stream_copy;
@@ -12366,7 +12755,8 @@ uint8_t *FFmpegMedia::get_line(AVIOContext *s)
 
     if (avio_open_dyn_buf(&line) < 0) {
         av_log(NULL, AV_LOG_FATAL, "Could not alloc buffer for reading preset.\n");
-        exit_program(1);
+        //exit_program(1);
+        return nullptr;
     }
 
     while ((c = avio_r8(s)) && c != '\n')
@@ -12399,7 +12789,8 @@ OutputStream *FFmpegMedia::new_output_stream(OptionsContext *o, AVFormatContext 
 
     if (!st) {
         av_log(NULL, AV_LOG_FATAL, "Could not alloc stream.\n");
-        exit_program(1);
+        //exit_program(1);
+        return nullptr;
     }
 
     if (oc->nb_streams - 1 < o->nb_streamid_map)
@@ -12407,8 +12798,13 @@ OutputStream *FFmpegMedia::new_output_stream(OptionsContext *o, AVFormatContext 
 
     //GROW_ARRAY(output_streams, nb_output_streams);//在二级数组中添加一个一级指针大小的元素
     GROW_ARRAY_EX(output_streams, OutputStream **, nb_output_streams);
-    if (!(ost = (OutputStream *)av_mallocz(sizeof(*ost))))
-        exit_program(1);
+    if(!output_streams) {
+        return nullptr;
+    }
+    if (!(ost = (OutputStream *)av_mallocz(sizeof(*ost)))){
+        //exit_program(1);
+        return nullptr;
+    }
     output_streams[nb_output_streams - 1] = ost;// 给一级指针赋值
 
     /*2.给OutputStream相关成员赋值*/
@@ -12423,14 +12819,16 @@ OutputStream *FFmpegMedia::new_output_stream(OptionsContext *o, AVFormatContext 
     if (ret < 0) {
         av_log(NULL, AV_LOG_FATAL, "Error selecting an encoder for stream "
                "%d:%d\n", ost->file_index, ost->index);
-        exit_program(1);
+        //exit_program(1);
+        return nullptr;
     }
 
     /*4.开辟编码器上下文*/
     ost->enc_ctx = avcodec_alloc_context3(ost->enc);
     if (!ost->enc_ctx) {
         av_log(NULL, AV_LOG_ERROR, "Error allocating the encoding context.\n");
-        exit_program(1);
+        //exit_program(1);
+        return nullptr;
     }
     ost->enc_ctx->codec_type = type;
 
@@ -12438,7 +12836,8 @@ OutputStream *FFmpegMedia::new_output_stream(OptionsContext *o, AVFormatContext 
     ost->ref_par = avcodec_parameters_alloc();
     if (!ost->ref_par) {
         av_log(NULL, AV_LOG_ERROR, "Error allocating the encoding parameters.\n");
-        exit_program(1);
+        //exit_program(1);
+        return nullptr;
     }
 
     /*6.从o->g->codec_opts过滤选项，保存到OutputStream的encoder_opts中*/
@@ -12461,7 +12860,8 @@ OutputStream *FFmpegMedia::new_output_stream(OptionsContext *o, AVFormatContext 
                 }
                 if (!(arg = strchr(buf, '='))) {
                     av_log(NULL, AV_LOG_FATAL, "Invalid line found in the preset file.\n");
-                    exit_program(1);
+                    //exit_program(1);
+                    return nullptr;
                 }
                 *arg++ = 0;
                 av_dict_set(&ost->encoder_opts, buf, arg, AV_DICT_DONT_OVERWRITE);
@@ -12473,7 +12873,8 @@ OutputStream *FFmpegMedia::new_output_stream(OptionsContext *o, AVFormatContext 
             av_log(NULL, AV_LOG_FATAL,
                    "Preset %s specified for stream %d:%d, but could not be opened.\n",
                    preset, ost->file_index, ost->index);
-            exit_program(1);
+            //exit_program(1);
+            return nullptr;
         }
     } else {
         ost->encoder_opts = filter_codec_opts(o->g->codec_opts, AV_CODEC_ID_NONE, oc, st, NULL);
@@ -12507,7 +12908,8 @@ OutputStream *FFmpegMedia::new_output_stream(OptionsContext *o, AVFormatContext 
         if (av_parse_ratio(&q, time_base, INT_MAX, 0, NULL) < 0 ||
             q.num <= 0 || q.den <= 0) {
             av_log(NULL, AV_LOG_FATAL, "Invalid time base: %s\n", time_base);
-            exit_program(1);
+            //exit_program(1);
+            return nullptr;
         }
         /*AVStream结构体每个字段解释 see https://blog.csdn.net/weixin_44517656/article/details/109645489*/
         st->time_base = q;
@@ -12521,7 +12923,8 @@ OutputStream *FFmpegMedia::new_output_stream(OptionsContext *o, AVFormatContext 
         if (av_parse_ratio(&q, time_base, INT_MAX, 0, NULL) < 0 ||
             q.den <= 0) {
             av_log(NULL, AV_LOG_FATAL, "Invalid time base: %s\n", time_base);
-            exit_program(1);
+            //exit_program(1);
+            return nullptr;
         }
         ost->enc_timebase = q;
     }
@@ -12551,28 +12954,36 @@ OutputStream *FFmpegMedia::new_output_stream(OptionsContext *o, AVFormatContext 
         char *bsf, *bsf_options_str, *bsf_name;
 
         bsf = av_get_token(&bsfs, ",");
-        if (!bsf)
-            exit_program(1);
+        if (!bsf){
+            //exit_program(1);
+            return nullptr;
+        }
         bsf_name = av_strtok(bsf, "=", &bsf_options_str);
-        if (!bsf_name)
-            exit_program(1);
+        if (!bsf_name){
+            //exit_program(1);
+            return nullptr;
+        }
 
         filter = av_bsf_get_by_name(bsf_name);
         if (!filter) {
             av_log(NULL, AV_LOG_FATAL, "Unknown bitstream filter %s\n", bsf_name);
-            exit_program(1);
+            //exit_program(1);
+            return nullptr;
         }
 
         ost->bsf_ctx = (AVBSFContext **)av_realloc_array(ost->bsf_ctx,
                                         ost->nb_bitstream_filters + 1,
                                         sizeof(*ost->bsf_ctx));
-        if (!ost->bsf_ctx)
-            exit_program(1);
+        if (!ost->bsf_ctx){
+            //exit_program(1);
+            return nullptr;
+        }
 
         ret = av_bsf_alloc(filter, &ost->bsf_ctx[ost->nb_bitstream_filters]);
         if (ret < 0) {
             av_log(NULL, AV_LOG_ERROR, "Error allocating a bitstream filter context\n");
-            exit_program(1);
+            //exit_program(1);
+            return nullptr;
         }
 
         ost->nb_bitstream_filters++;
@@ -12587,7 +12998,8 @@ OutputStream *FFmpegMedia::new_output_stream(OptionsContext *o, AVFormatContext 
             ret = av_opt_set_from_string(ost->bsf_ctx[ost->nb_bitstream_filters-1]->priv_data, bsf_options_str, shorthand, "=", ":");
             if (ret < 0) {
                 av_log(NULL, AV_LOG_ERROR, "Error parsing options for bitstream filter %s\n", bsf_name);
-                exit_program(1);
+                //exit_program(1);
+                return nullptr;
             }
         }
         av_freep(&bsf);
@@ -12647,13 +13059,56 @@ OutputStream *FFmpegMedia::new_output_stream(OptionsContext *o, AVFormatContext 
 
     /*给复用队列开辟内存*/
     ost->muxing_queue = av_fifo_alloc(8 * sizeof(AVPacket));
-    if (!ost->muxing_queue)
-        exit_program(1);
+    if (!ost->muxing_queue){
+        //exit_program(1);
+        return nullptr;
+    }
 
     return ost;
 }
 
-void FFmpegMedia::parse_matrix_coeffs(uint16_t *dest, const char *str)
+void FFmpegMedia::free_output_stream(OutputStream *ost){
+
+    if (!ost)
+        return;
+
+    int j;
+
+    for (j = 0; j < ost->nb_bitstream_filters; j++)
+        av_bsf_free(&ost->bsf_ctx[j]);
+    av_freep(&ost->bsf_ctx);
+
+    av_frame_free(&ost->filtered_frame);
+    av_frame_free(&ost->last_frame);
+    av_dict_free(&ost->encoder_opts);
+
+    av_freep(&ost->forced_keyframes);
+    av_expr_free(ost->forced_keyframes_pexpr);
+    av_freep(&ost->avfilter);
+    av_freep(&ost->logfile_prefix);
+
+    av_freep(&ost->audio_channels_map);
+    ost->audio_channels_mapped = 0;
+
+    av_dict_free(&ost->sws_dict);
+    av_dict_free(&ost->swr_opts);
+
+    avcodec_free_context(&ost->enc_ctx);// 释放编码器上下文
+    avcodec_parameters_free(&ost->ref_par);
+
+    if (ost->muxing_queue) {
+        while (av_fifo_size(ost->muxing_queue)) {
+            AVPacket pkt;
+            av_fifo_generic_read(ost->muxing_queue, &pkt, sizeof(pkt), NULL);
+            av_packet_unref(&pkt);
+        }
+        av_fifo_freep(&ost->muxing_queue);
+    }
+
+    av_freep(&ost);
+}
+
+int FFmpegMedia::parse_matrix_coeffs(uint16_t *dest, const char *str)
 {
     int i;
     const char *p = str;
@@ -12664,10 +13119,13 @@ void FFmpegMedia::parse_matrix_coeffs(uint16_t *dest, const char *str)
         p = strchr(p, ',');
         if (!p) {
             av_log(NULL, AV_LOG_FATAL, "Syntax error in matrix \"%s\" at coeff %d\n", str, i);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
         p++;
     }
+
+    return 0;
 }
 
 /**
@@ -12738,12 +13196,18 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
     OutputStream *ost;
     AVCodecContext *video_enc;
     char *frame_rate = NULL, *frame_aspect_ratio = NULL;
+    int ret;
 
     /*1.为视频创建一个输出流OutputStream，通过返回值返回.
     注，oc->streams同样会有该AVStream *st，即OutputStream与oc结构都保存了该AVStream *st.
     ost->st与oc->streams中的指向肯定不一样，因为前者是一级指针，后者是二级指针(可取oc->streams[0]看指向是一样的)
     */
     ost = new_output_stream(o, oc, AVMEDIA_TYPE_VIDEO, source_index);
+    if(!ost){
+        av_log(NULL, AV_LOG_FATAL, "new_output_stream(AVMEDIA_TYPE_VIDEO) failed.\n");
+        ret = -1;
+        goto fail;
+    }
     st  = ost->st;
     video_enc = ost->enc_ctx;
 
@@ -12752,7 +13216,9 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
     MATCH_PER_STREAM_OPT_EX(frame_rates, str, frame_rate, char *, oc, st);
     if (frame_rate && av_parse_video_rate(&ost->frame_rate, frame_rate) < 0) {
         av_log(NULL, AV_LOG_FATAL, "Invalid framerate value: %s\n", frame_rate);
-        exit_program(1);
+        //exit_program(1);
+        ret = -1;
+        goto fail;
     }
     /*使用-vsync 0和-r会产生无效的输出文件，两者不能同时使用*/
     if (frame_rate && video_sync_method == VSYNC_PASSTHROUGH)
@@ -12768,7 +13234,9 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
         if (av_parse_ratio(&q, frame_aspect_ratio, 255, 0, NULL) < 0 ||
             q.num <= 0 || q.den <= 0) {
             av_log(NULL, AV_LOG_FATAL, "Invalid aspect ratio: %s\n", frame_aspect_ratio);
-            exit_program(1);
+            //exit_program(1);
+            ret = -1;
+            goto fail;
         }
         ost->frame_aspect_ratio = q;
     }
@@ -12797,7 +13265,9 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
         MATCH_PER_STREAM_OPT_EX(frame_sizes, str, frame_size, char *, oc, st);
         if (frame_size && av_parse_video_size(&video_enc->width, &video_enc->height, frame_size) < 0) {
             av_log(NULL, AV_LOG_FATAL, "Invalid frame size: %s.\n", frame_size);
-            exit_program(1);
+            //exit_program(1);
+            ret = -1;
+            goto fail;
         }
 
         /*对应参数"bits_per_raw_sample"，暂未研究*/
@@ -12812,7 +13282,9 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
         }
         if (frame_pix_fmt && (video_enc->pix_fmt = av_get_pix_fmt(frame_pix_fmt)) == AV_PIX_FMT_NONE) {
             av_log(NULL, AV_LOG_FATAL, "Unknown pixel format requested: %s.\n", frame_pix_fmt);
-            exit_program(1);
+            //exit_program(1);
+            ret = -1;
+            goto fail;
         }
         /*video_enc->sample_aspect_ratio参数暂未研究.默认值是{0,1}*/
         st->sample_aspect_ratio = video_enc->sample_aspect_ratio;
@@ -12828,9 +13300,14 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
         if (intra_matrix) {
             if (!(video_enc->intra_matrix = (uint16_t *)av_mallocz(sizeof(*video_enc->intra_matrix) * 64))) {
                 av_log(NULL, AV_LOG_FATAL, "Could not allocate memory for intra matrix.\n");
-                exit_program(1);
+                //exit_program(1);
+                ret = -1;
+                goto fail;
             }
-            parse_matrix_coeffs(video_enc->intra_matrix, intra_matrix);
+            ret = parse_matrix_coeffs(video_enc->intra_matrix, intra_matrix);
+            if(ret < 0){
+                return nullptr;
+            }
         }
         //对应参数"chroma_intra_matrix"
         //MATCH_PER_STREAM_OPT(chroma_intra_matrices, str, chroma_intra_matrix, oc, st);
@@ -12839,10 +13316,15 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
             uint16_t *p = (uint16_t *)av_mallocz(sizeof(*video_enc->chroma_intra_matrix) * 64);
             if (!p) {
                 av_log(NULL, AV_LOG_FATAL, "Could not allocate memory for intra matrix.\n");
-                exit_program(1);
+                //exit_program(1);
+                ret = -1;
+                goto fail;
             }
             video_enc->chroma_intra_matrix = p;
-            parse_matrix_coeffs(p, chroma_intra_matrix);
+            ret = parse_matrix_coeffs(p, chroma_intra_matrix);
+            if(ret < 0){
+                return nullptr;
+            }
         }
         //对应参数"inter_matrix"
         //MATCH_PER_STREAM_OPT(inter_matrices, str, inter_matrix, oc, st);
@@ -12850,9 +13332,15 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
         if (inter_matrix) {
             if (!(video_enc->inter_matrix = (uint16_t *)av_mallocz(sizeof(*video_enc->inter_matrix) * 64))) {
                 av_log(NULL, AV_LOG_FATAL, "Could not allocate memory for inter matrix.\n");
-                exit_program(1);
+                //exit_program(1);
+                ret = -1;
+                goto fail;
             }
-            parse_matrix_coeffs(video_enc->inter_matrix, inter_matrix);
+            ret = parse_matrix_coeffs(video_enc->inter_matrix, inter_matrix);
+            if(ret < 0){
+                ret = -1;
+                goto fail;
+            }
         }
 
         /*rc_overrides参数暂未研究.推流没用到*/
@@ -12867,14 +13355,18 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
             int e = sscanf(p, "%d,%d,%d", &start, &end, &q);
             if (e != 3) {
                 av_log(NULL, AV_LOG_FATAL, "error parsing rc_override\n");
-                exit_program(1);
+                //exit_program(1);
+                ret = -1;
+                goto fail;
             }
             video_enc->rc_override =
                 (RcOverride *)av_realloc_array(video_enc->rc_override,
                                  i + 1, sizeof(RcOverride));
             if (!video_enc->rc_override) {
                 av_log(NULL, AV_LOG_FATAL, "Could not (re)allocate memory for rc_override.\n");
-                exit_program(1);
+                //exit_program(1);
+                ret = -1;
+                goto fail;
             }
             video_enc->rc_override[i].start_frame = start;
             video_enc->rc_override[i].end_frame   = end;
@@ -12915,8 +13407,11 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
         //MATCH_PER_STREAM_OPT(passlogfiles, str, ost->logfile_prefix, oc, st);
         MATCH_PER_STREAM_OPT_EX(passlogfiles, str, ost->logfile_prefix, char *, oc, st);
         if (ost->logfile_prefix &&
-            !(ost->logfile_prefix = av_strdup(ost->logfile_prefix)))
-            exit_program(1);
+            !(ost->logfile_prefix = av_strdup(ost->logfile_prefix))){
+            //exit_program(1);
+            ret = -1;
+            goto fail;
+        }
 
         /*do_passs参数暂未研究.推流没用到*/
         if (do_pass) {
@@ -12938,7 +13433,9 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
                     if (!logbuffer) {
                         av_log(NULL, AV_LOG_FATAL, "Error reading log file '%s' for pass-2 encoding\n",
                                logfilename);
-                        exit_program(1);
+                        //exit_program(1);
+                        ret = -1;
+                        goto fail;
                     }
                     video_enc->stats_in = logbuffer;
                 }
@@ -12949,7 +13446,9 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
                         av_log(NULL, AV_LOG_FATAL,
                                "Cannot write log file '%s' for pass-1 encoding: %s\n",
                                logfilename, strerror(errno));
-                        exit_program(1);
+                        //exit_program(1);
+                        ret = -1;
+                        goto fail;
                     }
                     ost->logfile = f;
                 }
@@ -12979,8 +13478,11 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
 
         /*get_ost_filters流程很简单*/
         ost->avfilter = get_ost_filters(o, oc, ost);
-        if (!ost->avfilter)
-            exit_program(1);
+        if (!ost->avfilter){
+            //exit_program(1);
+            ret = -1;
+            goto fail;
+        }
     } else {
         /*未研究过该参数*/
         //流拷贝，不需要重新编码的处理
@@ -12989,8 +13491,23 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
     }
 
     /*3.不转码流程*/
-    if (ost->stream_copy)
-        check_streamcopy_filters(o, oc, ost, AVMEDIA_TYPE_VIDEO);
+    if (ost->stream_copy) {
+        ret = check_streamcopy_filters(o, oc, ost, AVMEDIA_TYPE_VIDEO);
+        if(ret < 0){
+            ret = -1;
+            goto fail;
+        }
+    }
+
+    ret = 0;
+
+fail:
+    if(ret < 0){
+        av_log(NULL, AV_LOG_FATAL, "new_video_stream failed.\n");
+        // 这里不需要释放new_output_stream()开辟的内容.
+        // 析构调ffmpeg_cleanup()时会释放,因为ost=new_output_stream()成功会保存到 类成员output_streams
+        return nullptr;
+    }
 
     return ost;
 }
@@ -13005,7 +13522,7 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
  *
  * @note 若指定了copy，但还使用了过滤器相关功能，程序会直接退出
 */
-void FFmpegMedia::check_streamcopy_filters(OptionsContext *o, AVFormatContext *oc,
+int FFmpegMedia::check_streamcopy_filters(OptionsContext *o, AVFormatContext *oc,
                                      const OutputStream *ost, enum AVMediaType type)
 {
     /*1.这里看到，若使用copy不转码，就无法再使用过滤器相关的功能*/
@@ -13016,8 +13533,11 @@ void FFmpegMedia::check_streamcopy_filters(OptionsContext *o, AVFormatContext *o
                ost->filters ? "Filtergraph" : "Filtergraph script",
                ost->filters ? ost->filters : ost->filters_script,
                av_get_media_type_string(type), ost->file_index, ost->index);
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
+
+    return 0;
 }
 
 /**
@@ -13036,7 +13556,8 @@ char *FFmpegMedia::get_ost_filters(OptionsContext *o, AVFormatContext *oc,
     if (ost->filters_script && ost->filters) {
         av_log(NULL, AV_LOG_ERROR, "Both -filter and -filter_script set for "
                "output stream #%d:%d.\n", nb_output_files, st->index);
-        exit_program(1);
+        //exit_program(1);
+        return nullptr;
     }
 
     /* 2.若过滤器描述是使用脚本，则读取里面的内容进行返回 */
@@ -13050,7 +13571,7 @@ char *FFmpegMedia::get_ost_filters(OptionsContext *o, AVFormatContext *oc,
                      "null" : "anull");
 }
 
-void FFmpegMedia::init_output_filter(OutputFilter *ofilter, OptionsContext *o,
+int FFmpegMedia::init_output_filter(OutputFilter *ofilter, OptionsContext *o,
                                AVFormatContext *oc)
 {
     OutputStream *ost;
@@ -13061,7 +13582,12 @@ void FFmpegMedia::init_output_filter(OutputFilter *ofilter, OptionsContext *o,
     default:
         av_log(NULL, AV_LOG_FATAL, "Only video and audio filters are supported "
                "currently.\n");
-        exit_program(1);
+        //exit_program(1);
+        return -1;
+    }
+
+    if(!ost){
+        return -1;
     }
 
     ost->source_index = -1;
@@ -13074,7 +13600,8 @@ void FFmpegMedia::init_output_filter(OutputFilter *ofilter, OptionsContext *o,
         av_log(NULL, AV_LOG_ERROR, "Streamcopy requested for output stream %d:%d, "
                "which is fed from a complex filtergraph. Filtering and streamcopy "
                "cannot be used together.\n", ost->file_index, ost->index);
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
 
     if (ost->avfilter && (ost->filters || ost->filters_script)) {
@@ -13086,10 +13613,12 @@ void FFmpegMedia::init_output_filter(OutputFilter *ofilter, OptionsContext *o,
                ost->filters ? "Filtergraph" : "Filtergraph script",
                ost->filters ? ost->filters : ost->filters_script,
                opt, ost->file_index, ost->index, opt);
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
 
     avfilter_inout_free(&ofilter->out_tmp);
+    return 0;
 }
 
 OutputStream *FFmpegMedia::new_audio_stream(OptionsContext *o, AVFormatContext *oc, int source_index)
@@ -13098,9 +13627,15 @@ OutputStream *FFmpegMedia::new_audio_stream(OptionsContext *o, AVFormatContext *
     AVStream *st;
     OutputStream *ost;
     AVCodecContext *audio_enc;
+    int ret;
 
     /*1.根据输入音频流创建一个输出音频流*/
     ost = new_output_stream(o, oc, AVMEDIA_TYPE_AUDIO, source_index);
+    if (!ost) {
+        av_log(NULL, AV_LOG_FATAL, "new_output_stream(AVMEDIA_TYPE_AUDIO) failed.\n");
+        ret = -1;
+        goto fail;
+    }
     st  = ost->st;
 
     audio_enc = ost->enc_ctx;
@@ -13133,7 +13668,9 @@ OutputStream *FFmpegMedia::new_audio_stream(OptionsContext *o, AVFormatContext *
         if (sample_fmt &&
             (audio_enc->sample_fmt = av_get_sample_fmt(sample_fmt)) == AV_SAMPLE_FMT_NONE) {
             av_log(NULL, AV_LOG_FATAL, "Invalid sample format '%s'\n", sample_fmt);
-            exit_program(1);
+            //exit_program(1);
+            ret = -1;
+            goto fail;
         }
 
         /*-ar采样率选项*/
@@ -13145,8 +13682,11 @@ OutputStream *FFmpegMedia::new_audio_stream(OptionsContext *o, AVFormatContext *
 
         /*获取音视频过滤器描述*/
         ost->avfilter = get_ost_filters(o, oc, ost);
-        if (!ost->avfilter)
-            exit_program(1);
+        if (!ost->avfilter){
+            //exit_program(1);
+            ret = -1;
+            goto fail;
+        }
 
         /* check for channel mapping for this audio stream */
         for (n = 0; n < o->nb_audio_channel_maps; n++) {
@@ -13170,8 +13710,11 @@ OutputStream *FFmpegMedia::new_audio_stream(OptionsContext *o, AVFormatContext *
                     if (av_reallocp_array(&ost->audio_channels_map,
                                           ost->audio_channels_mapped + 1,
                                           sizeof(*ost->audio_channels_map)
-                                          ) < 0 )
-                        exit_program(1);
+                                          ) < 0 ){
+                        //exit_program(1);
+                        ret = -1;
+                        goto fail;
+                    }
 
                     ost->audio_channels_map[ost->audio_channels_mapped++] = map->channel_idx;
                 }
@@ -13180,8 +13723,21 @@ OutputStream *FFmpegMedia::new_audio_stream(OptionsContext *o, AVFormatContext *
     }//<== if (!ost->stream_copy) end ==>
 
     /*3.若不转码，则初始化音频流的流程比较简单*/
-    if (ost->stream_copy)
-        check_streamcopy_filters(o, oc, ost, AVMEDIA_TYPE_AUDIO);
+    if (ost->stream_copy){
+        ret = check_streamcopy_filters(o, oc, ost, AVMEDIA_TYPE_AUDIO);
+        if(ret < 0){
+            ret = -1;
+            goto fail;
+        }
+    }
+
+    ret = 0;
+
+fail:
+    if(ret < 0){
+        av_log(NULL, AV_LOG_FATAL, "new_audio_stream failed.\n");
+        return nullptr;
+    }
 
     return ost;
 }
@@ -13197,9 +13753,15 @@ OutputStream *FFmpegMedia::new_subtitle_stream(OptionsContext *o, AVFormatContex
     AVStream *st;
     OutputStream *ost;
     AVCodecContext *subtitle_enc;
+    int ret;
 
     /*1.利用输入字幕流创建一个输出字幕流*/
     ost = new_output_stream(o, oc, AVMEDIA_TYPE_SUBTITLE, source_index);
+    if(!ost){
+        av_log(NULL, AV_LOG_FATAL, "new_output_stream(AVMEDIA_TYPE_SUBTITLE) failed.\n");
+        ret = -1;
+        goto fail;
+    }
     st  = ost->st;
     subtitle_enc = ost->enc_ctx;
 
@@ -13216,8 +13778,18 @@ OutputStream *FFmpegMedia::new_subtitle_stream(OptionsContext *o, AVFormatContex
         MATCH_PER_STREAM_OPT_EX(frame_sizes, str, frame_size, char *, oc, st);
         if (frame_size && av_parse_video_size(&subtitle_enc->width, &subtitle_enc->height, frame_size) < 0) {
             av_log(NULL, AV_LOG_FATAL, "Invalid frame size: %s.\n", frame_size);
-            exit_program(1);
+            //exit_program(1);
+            ret = -1;
+            goto fail;
         }
+    }
+
+    ret = 0;
+
+fail:
+    if(ret < 0){
+        av_log(NULL, AV_LOG_FATAL, "new_subtitle_stream failed.\n");
+        return nullptr;
     }
 
     return ost;
@@ -13228,9 +13800,14 @@ OutputStream *FFmpegMedia::new_data_stream(OptionsContext *o, AVFormatContext *o
     OutputStream *ost;
 
     ost = new_output_stream(o, oc, AVMEDIA_TYPE_DATA, source_index);
+    if(!ost){
+        av_log(NULL, AV_LOG_FATAL, "new_output_stream(AVMEDIA_TYPE_DATA) failed.\n");
+        return nullptr;
+    }
     if (!ost->stream_copy) {
         av_log(NULL, AV_LOG_FATAL, "Data stream encoding not supported yet (only streamcopy)\n");
-        exit_program(1);
+        //exit_program(1);
+        return nullptr;
     }
 
     return ost;
@@ -13239,6 +13816,10 @@ OutputStream *FFmpegMedia::new_data_stream(OptionsContext *o, AVFormatContext *o
 OutputStream *FFmpegMedia::new_attachment_stream(OptionsContext *o, AVFormatContext *oc, int source_index)
 {
     OutputStream *ost = new_output_stream(o, oc, AVMEDIA_TYPE_ATTACHMENT, source_index);
+    if(!ost){
+        av_log(NULL, AV_LOG_FATAL, "new_output_stream(AVMEDIA_TYPE_ATTACHMENT) failed.\n");
+        return nullptr;
+    }
     ost->stream_copy = 1;
     ost->finished    = (OSTFinished)1;
     return ost;
@@ -13249,9 +13830,14 @@ OutputStream *FFmpegMedia::new_unknown_stream(OptionsContext *o, AVFormatContext
     OutputStream *ost;
 
     ost = new_output_stream(o, oc, AVMEDIA_TYPE_UNKNOWN, source_index);
+    if(!ost){
+        av_log(NULL, AV_LOG_FATAL, "new_output_stream(AVMEDIA_TYPE_UNKNOWN) failed.\n");
+        return nullptr;
+    }
     if (!ost->stream_copy) {
         av_log(NULL, AV_LOG_FATAL, "Unknown stream encoding not supported yet (only streamcopy)\n");
-        exit_program(1);
+        //exit_program(1);
+        return nullptr;
     }
 
     return ost;
@@ -13272,17 +13858,23 @@ int FFmpegMedia::init_simple_filtergraph(InputStream *ist, OutputStream *ost)
 {
     /*1.给封装好的系统过滤器FilterGraph开辟内存*/
     FilterGraph *fg = (FilterGraph *)av_mallocz(sizeof(*fg));
-
-    if (!fg)
-        exit_program(1);
+    if (!fg){
+        //exit_program(1);
+        return -1;
+    }
     fg->index = nb_filtergraphs;
 
     /*2.开辟一个OutputFilter *指针和开辟一个OutputFilter结构体，
      并让该指针指向该结构体，然后对该结构体进行相关赋值*/
     //GROW_ARRAY(fg->outputs, fg->nb_outputs);//开辟OutputFilter *指针
     GROW_ARRAY_EX(fg->outputs, OutputFilter **, fg->nb_outputs);
-    if (!(fg->outputs[0] = (OutputFilter *)av_mallocz(sizeof(*fg->outputs[0]))))// 开辟一个OutputFilter结构体
-        exit_program(1);
+    if (!fg->outputs){
+        return -1;
+    }
+    if (!(fg->outputs[0] = (OutputFilter *)av_mallocz(sizeof(*fg->outputs[0])))){// 开辟一个OutputFilter结构体
+        //exit_program(1);
+        return -1;
+    }
     fg->outputs[0]->ost   = ost;//保存输出流
     fg->outputs[0]->graph = fg;//保存该系统过滤器
     fg->outputs[0]->format = -1;
@@ -13293,8 +13885,14 @@ int FFmpegMedia::init_simple_filtergraph(InputStream *ist, OutputStream *ost)
      并让该指针指向该结构体，然后对该结构体进行相关赋值*/
     //GROW_ARRAY(fg->inputs, fg->nb_inputs);
     GROW_ARRAY_EX(fg->inputs, InputFilter **, fg->nb_inputs);
-    if (!(fg->inputs[0] = (InputFilter *)av_mallocz(sizeof(*fg->inputs[0]))))
-        exit_program(1);
+    if (!fg->inputs){
+        return -1;
+    }
+    if (!(fg->inputs[0] = (InputFilter *)av_mallocz(sizeof(*fg->inputs[0])))){
+        //exit_program(1);
+        return -1;
+    }
+
     /*与输出过滤器赋值同理*/
     fg->inputs[0]->ist   = ist;
     fg->inputs[0]->graph = fg;
@@ -13302,20 +13900,213 @@ int FFmpegMedia::init_simple_filtergraph(InputStream *ist, OutputStream *ost)
     /*给输入过滤器中的帧队列开辟内存，注意开辟的是指针大小的内存*/
     fg->inputs[0]->frame_queue = av_fifo_alloc(8 * sizeof(AVFrame*));/*开辟内存，只不过是使用结构体AVFifoBuffer进行返回，
                                                                         av_fifo_alloc源码很简单，可以看看*/
-    if (!fg->inputs[0]->frame_queue)
-        exit_program(1);
+    if (!fg->inputs[0]->frame_queue){
+        //exit_program(1);
+        return -1;
+    }
 
     //GROW_ARRAY(ist->filters, ist->nb_filters);// 给输入流的过滤器开辟一个指针
     GROW_ARRAY_EX(ist->filters, InputFilter **, ist->nb_filters);
+    if(!ist->filters){
+        return -1;
+    }
     ist->filters[ist->nb_filters - 1] = fg->inputs[0];// 给输入流的过滤器赋值，对比输出流OutputStream可以看到，输入流可以有多个输入过滤器
 
     /*4.保存FilterGraph fg，其中该fg保存了新开辟的输出过滤器OutputFilter 以及 新开辟的输入过滤器InputFilter*/
     //GROW_ARRAY(filtergraphs, nb_filtergraphs);
     GROW_ARRAY_EX(filtergraphs, FilterGraph **, nb_filtergraphs);
+    if(!filtergraphs){
+        return -1;
+    }
     filtergraphs[nb_filtergraphs - 1] = fg;
 
     return 0;
 }
+
+char *FFmpegMedia::describe_filter_link(FilterGraph *fg, AVFilterInOut *inout, int in)
+{
+    AVFilterContext *ctx = inout->filter_ctx;
+    AVFilterPad *pads = in ? ctx->input_pads  : ctx->output_pads;
+    int       nb_pads = in ? ctx->nb_inputs   : ctx->nb_outputs;
+    AVIOContext *pb;
+    uint8_t *res = NULL;
+
+    if (avio_open_dyn_buf(&pb) < 0){
+        //exit_program(1);
+        return nullptr;
+    }
+
+    avio_printf(pb, "%s", ctx->filter->name);
+    if (nb_pads > 1)
+        avio_printf(pb, ":%s", avfilter_pad_get_name(pads, inout->pad_idx));
+    avio_w8(pb, 0);
+    avio_close_dyn_buf(pb, &res);
+    return (char*)res;
+}
+
+int FFmpegMedia::init_input_filter(FilterGraph *fg, AVFilterInOut *in)
+{
+    InputStream *ist = NULL;
+    enum AVMediaType type = avfilter_pad_get_type(in->filter_ctx->input_pads, in->pad_idx);
+    int i;
+
+    // TODO: support other filter types
+    if (type != AVMEDIA_TYPE_VIDEO && type != AVMEDIA_TYPE_AUDIO) {
+        av_log(NULL, AV_LOG_FATAL, "Only video and audio filters supported "
+               "currently.\n");
+        //exit_program(1);
+        return -1;
+    }
+
+    if (in->name) {
+        AVFormatContext *s;
+        AVStream       *st = NULL;
+        char *p;
+        int file_idx = strtol(in->name, &p, 0);
+
+        if (file_idx < 0 || file_idx >= nb_input_files) {
+            av_log(NULL, AV_LOG_FATAL, "Invalid file index %d in filtergraph description %s.\n",
+                   file_idx, fg->graph_desc);
+            //exit_program(1);
+            return -1;
+        }
+        s = input_files[file_idx]->ctx;
+
+        for (i = 0; i < s->nb_streams; i++) {
+            enum AVMediaType stream_type = s->streams[i]->codecpar->codec_type;
+            if (stream_type != type &&
+                !(stream_type == AVMEDIA_TYPE_SUBTITLE &&
+                  type == AVMEDIA_TYPE_VIDEO /* sub2video hack */))
+                continue;
+            if (check_stream_specifier(s, s->streams[i], *p == ':' ? p + 1 : p) == 1) {
+                st = s->streams[i];
+                break;
+            }
+        }
+        if (!st) {
+            av_log(NULL, AV_LOG_FATAL, "Stream specifier '%s' in filtergraph description %s "
+                   "matches no streams.\n", p, fg->graph_desc);
+            //exit_program(1);
+            return -1;
+        }
+        ist = input_streams[input_files[file_idx]->ist_index + st->index];
+        if (ist->user_set_discard == AVDISCARD_ALL) {
+            av_log(NULL, AV_LOG_FATAL, "Stream specifier '%s' in filtergraph description %s "
+                   "matches a disabled input stream.\n", p, fg->graph_desc);
+            //exit_program(1);
+            return -1;
+        }
+    } else {
+        /* find the first unused stream of corresponding type */
+        for (i = 0; i < nb_input_streams; i++) {
+            ist = input_streams[i];
+            if (ist->user_set_discard == AVDISCARD_ALL)
+                continue;
+            if (ist->dec_ctx->codec_type == type && ist->discard)
+                break;
+        }
+        if (i == nb_input_streams) {
+            av_log(NULL, AV_LOG_FATAL, "Cannot find a matching stream for "
+                   "unlabeled input pad %d on filter %s\n", in->pad_idx,
+                   in->filter_ctx->name);
+            //exit_program(1);
+            return -1;
+        }
+    }
+    //av_assert0(ist);
+    if(!ist){
+        return -1;
+    }
+
+    ist->discard         = 0;
+    ist->decoding_needed |= DECODING_FOR_FILTER;
+    ist->st->discard = AVDISCARD_NONE;
+
+    //GROW_ARRAY(fg->inputs, fg->nb_inputs);
+    GROW_ARRAY_EX(fg->inputs, InputFilter   **, fg->nb_inputs);
+    if(!fg->inputs){
+        return -1;
+    }
+    if (!(fg->inputs[fg->nb_inputs - 1] = (InputFilter*)av_mallocz(sizeof(*fg->inputs[0])))){
+        //exit_program(1);
+        return -1;
+    }
+    fg->inputs[fg->nb_inputs - 1]->ist   = ist;
+    fg->inputs[fg->nb_inputs - 1]->graph = fg;
+    fg->inputs[fg->nb_inputs - 1]->format = -1;
+    fg->inputs[fg->nb_inputs - 1]->type = ist->st->codecpar->codec_type;
+    fg->inputs[fg->nb_inputs - 1]->name = (uint8_t *)describe_filter_link(fg, in, 1);// 先不处理describe_filter_link的返回值
+
+    fg->inputs[fg->nb_inputs - 1]->frame_queue = av_fifo_alloc(8 * sizeof(AVFrame*));
+    if (!fg->inputs[fg->nb_inputs - 1]->frame_queue){
+        //exit_program(1);
+        return -1;
+    }
+
+    //GROW_ARRAY(ist->filters, ist->nb_filters);
+    GROW_ARRAY_EX(ist->filters, InputFilter **, ist->nb_filters);
+    if(!ist->filters){
+        return -1;
+    }
+    ist->filters[ist->nb_filters - 1] = fg->inputs[fg->nb_inputs - 1];
+
+    return 0;
+}
+
+int FFmpegMedia::init_complex_filtergraph(FilterGraph *fg)
+{
+    AVFilterInOut *inputs, *outputs, *cur;
+    AVFilterGraph *graph;
+    int ret = 0;
+
+    /* this graph is only used for determining the kinds of inputs
+     * and outputs we have, and is discarded on exit from this function */
+    graph = avfilter_graph_alloc();
+    if (!graph)
+        return AVERROR(ENOMEM);
+    graph->nb_threads = 1;
+
+    ret = avfilter_graph_parse2(graph, fg->graph_desc, &inputs, &outputs);
+    if (ret < 0)
+        goto fail;
+
+    for (cur = inputs; cur; cur = cur->next){
+        ret = init_input_filter(fg, cur);
+        if(ret < 0){
+            ret = -1;
+            goto fail;
+        }
+    }
+
+    for (cur = outputs; cur;) {
+        //GROW_ARRAY(fg->outputs, fg->nb_outputs);
+        GROW_ARRAY_EX(fg->outputs, OutputFilter **, fg->nb_outputs);
+        if(!fg->outputs){
+            ret = -1;
+            goto fail;
+        }
+        fg->outputs[fg->nb_outputs - 1] = (OutputFilter *)av_mallocz(sizeof(*fg->outputs[0]));
+        if (!fg->outputs[fg->nb_outputs - 1]){
+            //exit_program(1);
+            ret = -1;
+            goto fail;
+        }
+
+        fg->outputs[fg->nb_outputs - 1]->graph   = fg;
+        fg->outputs[fg->nb_outputs - 1]->out_tmp = cur;
+        fg->outputs[fg->nb_outputs - 1]->type    = avfilter_pad_get_type(cur->filter_ctx->output_pads,
+                                                                         cur->pad_idx);
+        fg->outputs[fg->nb_outputs - 1]->name = (uint8_t *)describe_filter_link(fg, cur, 0);
+        cur = cur->next;
+        fg->outputs[fg->nb_outputs - 1]->out_tmp->next = NULL;
+    }
+
+fail:
+    avfilter_inout_free(&inputs);
+    avfilter_graph_free(&graph);
+    return ret;
+}
+
 
 /**
  * Parse a metadata specifier passed as 'arg' parameter.
@@ -13324,7 +14115,7 @@ int FFmpegMedia::init_simple_filtergraph(InputStream *ist, OutputStream *ost)
  * @param index for type c/p, chapter/program index is written here
  * @param stream_spec for type s, the stream specifier is written here
  */
-void FFmpegMedia::parse_meta_type(char *arg, char *type, int *index, const char **stream_spec)
+int FFmpegMedia::parse_meta_type(char *arg, char *type, int *index, const char **stream_spec)
 {
     if (*arg) {
         *type = *arg;
@@ -13334,7 +14125,8 @@ void FFmpegMedia::parse_meta_type(char *arg, char *type, int *index, const char 
         case 's':
             if (*(++arg) && *arg != ':') {
                 av_log(NULL, AV_LOG_FATAL, "Invalid metadata specifier %s.\n", arg);
-                exit_program(1);
+                //exit_program(1);
+                return -1;
             }
             *stream_spec = *arg == ':' ? arg + 1 : "";
             break;
@@ -13345,10 +14137,13 @@ void FFmpegMedia::parse_meta_type(char *arg, char *type, int *index, const char 
             break;
         default:
             av_log(NULL, AV_LOG_FATAL, "Invalid metadata type %c.\n", *arg);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
     } else
         *type = 'g';
+
+    return 0;
 }
 
 int FFmpegMedia::copy_metadata(char *outspec, char *inspec, AVFormatContext *oc, AVFormatContext *ic, OptionsContext *o)
@@ -13360,8 +14155,14 @@ int FFmpegMedia::copy_metadata(char *outspec, char *inspec, AVFormatContext *oc,
     const char *istream_spec = NULL, *ostream_spec = NULL;
     int idx_in = 0, idx_out = 0;
 
-    parse_meta_type(inspec,  &type_in,  &idx_in,  &istream_spec);
-    parse_meta_type(outspec, &type_out, &idx_out, &ostream_spec);
+    ret = parse_meta_type(inspec,  &type_in,  &idx_in,  &istream_spec);
+    if(ret < 0){
+        return -1;
+    }
+    ret = parse_meta_type(outspec, &type_out, &idx_out, &ostream_spec);
+    if(ret < 0){
+        return -1;
+    }
 
     if (!ic) {
         if (type_out == 'g' || !*outspec)
@@ -13384,11 +14185,17 @@ int FFmpegMedia::copy_metadata(char *outspec, char *inspec, AVFormatContext *oc,
     if (!ic)
         return 0;
 
+//#define METADATA_CHECK_INDEX(index, nb_elems, desc)\
+//    if ((index) < 0 || (index) >= (nb_elems)) {\
+//        av_log(NULL, AV_LOG_FATAL, "Invalid %s index %d while processing metadata maps.\n",\
+//                (desc), (index));\
+//        exit_program(1);\
+//    }
 #define METADATA_CHECK_INDEX(index, nb_elems, desc)\
     if ((index) < 0 || (index) >= (nb_elems)) {\
         av_log(NULL, AV_LOG_FATAL, "Invalid %s index %d while processing metadata maps.\n",\
                 (desc), (index));\
-        exit_program(1);\
+        return -1;\
     }
 
 #define SET_DICT(type, meta, context, index)\
@@ -13406,7 +14213,7 @@ int FFmpegMedia::copy_metadata(char *outspec, char *inspec, AVFormatContext *oc,
             break;\
         case 's':\
             break; /* handled separately below */ \
-        default: av_assert0(0);\
+        default: /* av_assert0(0); */ return -1;\
         }\
 
     SET_DICT(type_in, meta_in, ic, idx_in);
@@ -13418,12 +14225,16 @@ int FFmpegMedia::copy_metadata(char *outspec, char *inspec, AVFormatContext *oc,
             if ((ret = check_stream_specifier(ic, ic->streams[i], istream_spec)) > 0) {
                 meta_in = &ic->streams[i]->metadata;
                 break;
-            } else if (ret < 0)
-                exit_program(1);
+            } else if (ret < 0){
+                //exit_program(1);
+                return -1;
+            }
+
         }
         if (!meta_in) {
             av_log(NULL, AV_LOG_FATAL, "Stream specifier %s does not match  any streams.\n", istream_spec);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
     }
 
@@ -13432,8 +14243,10 @@ int FFmpegMedia::copy_metadata(char *outspec, char *inspec, AVFormatContext *oc,
             if ((ret = check_stream_specifier(oc, oc->streams[i], ostream_spec)) > 0) {
                 meta_out = &oc->streams[i]->metadata;
                 av_dict_copy(meta_out, *meta_in, AV_DICT_DONT_OVERWRITE);
-            } else if (ret < 0)
-                exit_program(1);
+            } else if (ret < 0){
+                //exit_program(1);
+                return -1;
+            }
         }
     } else
         av_dict_copy(meta_out, *meta_in, AV_DICT_DONT_OVERWRITE);
@@ -13498,7 +14311,7 @@ void FFmpegMedia::tyy_print_AVDirnary(AVDictionary *d){
 int FFmpegMedia::open_output_file(OptionsContext *o, const char *filename)
 {
     AVFormatContext *oc;
-    int i, j, err;
+    int i, j, err, ret;
     OutputFile *of;
     OutputStream *ost;
     InputStream  *ist;
@@ -13517,7 +14330,8 @@ int FFmpegMedia::open_output_file(OptionsContext *o, const char *filename)
         int64_t start_time = o->start_time == AV_NOPTS_VALUE ? 0 : o->start_time;
         if (o->stop_time <= start_time) {
             av_log(NULL, AV_LOG_ERROR, "-to value smaller than -ss; aborting.\n");
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         } else {
             o->recording_time = o->stop_time - start_time;
         }
@@ -13526,9 +14340,14 @@ int FFmpegMedia::open_output_file(OptionsContext *o, const char *filename)
     /*1.为一个输出文件开辟内存，并进行一些必要的初始化*/
     //GROW_ARRAY(output_files, nb_output_files);// 开辟sizeof(OutputFile*)大小的内存，nb_output_files自动+1
     GROW_ARRAY_EX(output_files, OutputFile **, nb_output_files);
+    if (!output_files){
+        return -1;
+    }
     of = (OutputFile *)av_mallocz(sizeof(*of));//开辟OutputFile结构体
-    if (!of)
-        exit_program(1);
+    if (!of){
+        //exit_program(1);
+        return -1;
+    }
     output_files[nb_output_files - 1] = of;
 
     /* 对of赋值 */
@@ -13548,7 +14367,8 @@ int FFmpegMedia::open_output_file(OptionsContext *o, const char *filename)
     err = avformat_alloc_output_context2(&oc, NULL, o->format, filename);
     if (!oc) {
         print_error(filename, err);
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
 
     of->ctx = oc;// 保存解复用的上下文
@@ -13597,7 +14417,12 @@ int FFmpegMedia::open_output_file(OptionsContext *o, const char *filename)
             case AVMEDIA_TYPE_AUDIO:    o->audio_disable    = 1; break;
             case AVMEDIA_TYPE_SUBTITLE: o->subtitle_disable = 1; break;
             }
-            init_output_filter(ofilter, o, oc);
+
+            ret = init_output_filter(ofilter, o, oc);
+            if(ret < 0){
+                av_log(NULL, AV_LOG_ERROR, "init_output_filter failed.\n");
+                return -1;
+            }
         }
     }
 
@@ -13661,8 +14486,13 @@ int FFmpegMedia::open_output_file(OptionsContext *o, const char *filename)
                 }
             }//<== for (i = 0; i < nb_input_streams; i++) end ==>
 
-            if (idx >= 0)
-                new_video_stream(o, oc, idx);//idx是视频流的下标.不需要处理返回值是因为，oc中也保存着一份新创建的流的地址.即oc->streams[]二级指针中
+            if (idx >= 0){
+                //idx是视频流的下标.不需要处理返回值是因为，oc中也保存着一份新创建的流的地址.即oc->streams[]二级指针中
+                if(new_video_stream(o, oc, idx) == nullptr){
+                    av_log(NULL, AV_LOG_ERROR, "new_video_stream failed.\n");
+                    return -1;
+                }
+            }
 
         }//<== if (!o->video_disable && av_guess_codec(oc->oformat, NULL, filename, NULL, AVMEDIA_TYPE_VIDEO) != AV_CODEC_ID_NONE) end ==>
 
@@ -13695,8 +14525,13 @@ int FFmpegMedia::open_output_file(OptionsContext *o, const char *filename)
                     idx = i;
                 }
             }
-            if (idx >= 0)
-                new_audio_stream(o, oc, idx);
+            if (idx >= 0){
+                if(new_audio_stream(o, oc, idx) == nullptr){
+                    av_log(NULL, AV_LOG_ERROR, "new_audio_stream failed.\n");
+                    return -1;
+                }
+            }
+
         }
         /*所以经过上面两步，ffmpeg为你选择了最好的视频流+音频流来创建输出文件*/
 
@@ -13763,7 +14598,10 @@ int FFmpegMedia::open_output_file(OptionsContext *o, const char *filename)
                         (!input_descriptor->props ||
                          !output_descriptor->props))//注意，当output_descriptor为空不会来到这里，所以不会存在段错误
                     {
-                        new_subtitle_stream(o, oc, i);
+                        if(new_subtitle_stream(o, oc, i) == nullptr){
+                            av_log(NULL, AV_LOG_ERROR, "new_subtitle_stream failed.\n");
+                            return -1;
+                        }
                         break;//这里看到，只会拿第一个字幕流
                     }
                 }
@@ -13778,8 +14616,12 @@ int FFmpegMedia::open_output_file(OptionsContext *o, const char *filename)
                 if (input_streams[i]->user_set_discard == AVDISCARD_ALL)
                     continue;
                 if (input_streams[i]->st->codecpar->codec_type == AVMEDIA_TYPE_DATA
-                    && input_streams[i]->st->codecpar->codec_id == codec_id )
-                    new_data_stream(o, oc, i);
+                    && input_streams[i]->st->codecpar->codec_id == codec_id ){
+                    if(new_data_stream(o, oc, i) == nullptr){
+                        av_log(NULL, AV_LOG_ERROR, "new_data_stream failed.\n");
+                        return -1;
+                    }
+                }
             }
         }
 
@@ -13810,9 +14652,14 @@ loop_end:
                 if (!ofilter) {
                     av_log(NULL, AV_LOG_FATAL, "Output with label '%s' does not exist "
                            "in any defined filter graph, or was already used elsewhere.\n", map->linklabel);
-                    exit_program(1);
+                    //exit_program(1);
+                    return -1;
                 }
-                init_output_filter(ofilter, o, oc);
+                ret = init_output_filter(ofilter, o, oc);
+                if(ret < 0){
+                    av_log(NULL, AV_LOG_FATAL, "init_output_filter failed.\n");
+                    return -1;
+                }
             } else {
                 int src_idx = input_files[map->file_index]->ist_index + map->stream_index;
 
@@ -13820,7 +14667,8 @@ loop_end:
                 if (ist->user_set_discard == AVDISCARD_ALL) {
                     av_log(NULL, AV_LOG_FATAL, "Stream #%d:%d is disabled and cannot be mapped.\n",
                            map->file_index, map->stream_index);
-                    exit_program(1);
+                    //exit_program(1);
+                    return -1;
                 }
                 if(o->subtitle_disable && ist->st->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE)
                     continue;
@@ -13852,8 +14700,13 @@ loop_end:
                                "If you want unsupported types ignored instead "
                                "of failing, please use the -ignore_unknown option\n"
                                "If you want them copied, please use -copy_unknown\n");
-                        exit_program(1);
+                        //exit_program(1);
+                        return -1;
                     }
+                }
+
+                if(!ost){// tyycode check ost that new stream successful
+                    return -1;
                 }
                 if (ost)
                     ost->sync_ist = input_streams[  input_files[map->sync_file_index]->ist_index
@@ -13874,23 +14727,29 @@ loop_end:
         if ((err = avio_open2(&pb, o->attachments[i], AVIO_FLAG_READ, &int_cb, NULL)) < 0) {
             av_log(NULL, AV_LOG_FATAL, "Could not open attachment file %s.\n",
                    o->attachments[i]);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
         if ((len = avio_size(pb)) <= 0) {
             av_log(NULL, AV_LOG_FATAL, "Could not get size of the attachment %s.\n",
                    o->attachments[i]);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
         if (len > INT_MAX - AV_INPUT_BUFFER_PADDING_SIZE ||
             !(attachment = (uint8_t *)av_malloc(len + AV_INPUT_BUFFER_PADDING_SIZE))) {
             av_log(NULL, AV_LOG_FATAL, "Attachment %s too large.\n",
                    o->attachments[i]);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
         avio_read(pb, attachment, len);
         memset(attachment + len, 0, AV_INPUT_BUFFER_PADDING_SIZE);
 
         ost = new_attachment_stream(o, oc, -1);
+        if(!ost){
+            return -1;
+        }
         ost->stream_copy               = 0;
         ost->attachment_filename       = o->attachments[i];
         ost->st->codecpar->extradata      = attachment;
@@ -13914,8 +14773,10 @@ loop_end:
             && (!e->key[5] || check_stream_specifier(oc, ost->st, e->key+6))){/*因为上面调用后，e->key可能是父串，"flags"作为子串，
             故!e->key[5]的意思是排除"flags"作为子串的可能，即刚好是"flags"，则程序退出.
             或者e->key+6后的字符串与对应的流不匹配(+6是因为跳过对应分隔符)，程序也退出.*/
-            if (av_opt_set(ost->st->codec, "flags", e->value, 0) < 0)
-                exit_program(1);
+            if (av_opt_set(ost->st->codec, "flags", e->value, 0) < 0){
+                //exit_program(1);
+                return -1;
+            }
         }
 
     }
@@ -13925,7 +14786,8 @@ loop_end:
     if (!oc->nb_streams && !(oc->oformat->flags & AVFMT_NOSTREAMS)) {
         av_dump_format(oc, nb_output_files - 1, oc->url, 1);
         av_log(NULL, AV_LOG_ERROR, "Output file #%d does not contain any stream\n", nb_output_files - 1);
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
 
     /* check if all codec options have been used */
@@ -13968,7 +14830,8 @@ loop_end:
                    "output file #%d (%s) is not an encoding option.\n", e->key,
                    option->help ? option->help : "", nb_output_files - 1,
                    filename);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
 
         // gop_timecode is injected by generic code but not always used
@@ -14009,7 +14872,8 @@ loop_end:
                            "Error initializing a simple filtergraph between streams "
                            "%d:%d->%d:%d\n", ist->file_index, ost->source_index,
                            nb_output_files - 1, ost->st->index);
-                    exit_program(1);
+                    //exit_program(1);
+                    return -1;
                 }
             }
         }
@@ -14039,8 +14903,11 @@ loop_end:
                     while (ost->enc->pix_fmts[count] != AV_PIX_FMT_NONE)
                         count++;
                     f->formats = (int *)av_mallocz_array(count + 1, sizeof(*f->formats));
-                    if (!f->formats)
-                        exit_program(1);
+                    if (!f->formats){
+                        //exit_program(1);
+                        return -1;
+                    }
+
                     memcpy(f->formats, ost->enc->pix_fmts, (count + 1) * sizeof(*f->formats));// 注，这里是formats数组
                 }
                 break;
@@ -14053,8 +14920,10 @@ loop_end:
                     while (ost->enc->sample_fmts[count] != AV_SAMPLE_FMT_NONE)
                         count++;
                     f->formats = (int *)av_mallocz_array(count + 1, sizeof(*f->formats));
-                    if (!f->formats)
-                        exit_program(1);
+                    if (!f->formats){
+                        //exit_program(1);
+                        return -1;
+                    }
                     memcpy(f->formats, ost->enc->sample_fmts, (count + 1) * sizeof(*f->formats));
                 }
                 /* 获取音频的采样率 */
@@ -14065,8 +14934,10 @@ loop_end:
                     while (ost->enc->supported_samplerates[count])
                         count++;
                     f->sample_rates = (int *)av_mallocz_array(count + 1, sizeof(*f->sample_rates));
-                    if (!f->sample_rates)
-                        exit_program(1);
+                    if (!f->sample_rates){
+                        //exit_program(1);
+                        return -1;
+                    }
                     memcpy(f->sample_rates, ost->enc->supported_samplerates,
                            (count + 1) * sizeof(*f->sample_rates));
                 }
@@ -14078,8 +14949,10 @@ loop_end:
                     while (ost->enc->channel_layouts[count])
                         count++;
                     f->channel_layouts = (uint64_t *)av_mallocz_array(count + 1, sizeof(*f->channel_layouts));
-                    if (!f->channel_layouts)
-                        exit_program(1);
+                    if (!f->channel_layouts){
+                        //exit_program(1);
+                        return -1;
+                    }
                     memcpy(f->channel_layouts, ost->enc->channel_layouts,
                            (count + 1) * sizeof(*f->channel_layouts));
                 }
@@ -14093,7 +14966,8 @@ loop_end:
     if (oc->oformat->flags & AVFMT_NEEDNUMBER) {
         if (!av_filename_number_test(oc->url)) {
             print_error(oc->url, AVERROR(EINVAL));
-            exit_program(1);
+            //exit_program(1);
+            return -1;;
         }
     }
 
@@ -14102,7 +14976,8 @@ loop_end:
     if (!(oc->oformat->flags & AVFMT_NOSTREAMS) && !input_stream_potentially_available) {
         av_log(NULL, AV_LOG_ERROR,
                "No input streams but output needs an input stream\n");
-        exit_program(1);
+        //exit_program(1);
+        return -1;
     }
 
     /*13. 判断该输出文件能否重写，若不能程序直接退出；能则将输出文件重置，等待后面的流程输入数据*/
@@ -14112,7 +14987,11 @@ loop_end:
     这个成员变量pb就不需要设置，因为muxers和demuxers会使用其它的方式处理输入/输出。*/
     if (!(oc->oformat->flags & AVFMT_NOFILE)) {
         /* test if it already exists to avoid losing precious files */
-        assert_file_overwrite(filename);
+        ret = assert_file_overwrite(filename);
+        if(ret < 0){
+            av_log(NULL, AV_LOG_ERROR, "assert_file_overwrite failed, file: %s has exist?\n", filename);
+            return -1;
+        }
 
         /* open the file */
         /*因为没有AVFMT_NOFILE，所以需要调avio_open2给oc->pb赋值*/
@@ -14122,10 +15001,17 @@ loop_end:
                               &oc->interrupt_callback,
                               &of->opts)) < 0) {
             print_error(filename, err);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
-    } else if (strcmp(oc->oformat->name, "image2")==0 && !av_filename_number_test(filename))
-        assert_file_overwrite(filename);
+    } else if (strcmp(oc->oformat->name, "image2")==0 && !av_filename_number_test(filename)){
+        ret = assert_file_overwrite(filename);
+        if(ret < 0){
+            av_log(NULL, AV_LOG_ERROR, "assert_file_overwrite(image2) failed, file: %s has exist?\n", filename);
+            return -1;
+        }
+    }
+
 
     if (o->mux_preload) {
         av_dict_set_int(&of->opts, "preload", o->mux_preload*AV_TIME_BASE, 0);
@@ -14143,11 +15029,17 @@ loop_end:
 
         if (in_file_index >= nb_input_files) {
             av_log(NULL, AV_LOG_FATAL, "Invalid input file index %d while processing metadata maps\n", in_file_index);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
-        copy_metadata(o->metadata_map[i].specifier, *p ? p + 1 : p, oc,
+
+        ret = copy_metadata(o->metadata_map[i].specifier, *p ? p + 1 : p, oc,
                       in_file_index >= 0 ?
                       input_files[in_file_index]->ctx : NULL, o);
+        if (ret < 0) {
+            av_log(NULL, AV_LOG_FATAL, "copy_metadata failed.\n");
+            return -1;
+        }
     }
 
     /* 15. copy chapters */
@@ -14164,13 +15056,14 @@ loop_end:
         } else {
             av_log(NULL, AV_LOG_FATAL, "Invalid input file index %d in chapter mapping.\n",
                    o->chapters_input_file);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
     }
     /*推流没用到，暂不研究*/
     if (o->chapters_input_file >= 0)
         copy_chapters(input_files[o->chapters_input_file], of,
-                      !o->metadata_chapters_manual);
+                      !o->metadata_chapters_manual);// ffmpeg并未处理copy_chapters返回值,所以我们也不管
 
     /*16. 这里就是将输入文件的全局元数据拷贝到输出文件的全局元数据*/
     /* copy global metadata by default */
@@ -14189,7 +15082,6 @@ loop_end:
     if (!o->metadata_global_manual && nb_input_files){
         av_dict_copy(&oc->metadata, input_files[0]->ctx->metadata,
                      AV_DICT_DONT_OVERWRITE);
-        //av_dict_set(&oc->metadata, "MAJOR_BRAND", "cwj", 0);
         if(o->recording_time != INT64_MAX)
             av_dict_set(&oc->metadata, "duration", NULL, 0);
         av_dict_set(&oc->metadata, "creation_time", NULL, 0);
@@ -14282,10 +15174,14 @@ loop_end:
                 av_log(NULL, AV_LOG_FATAL,
                        "No '=' character in program string %s.\n",
                        p2);
-                exit_program(1);
+                //exit_program(1);
+                return -1;
             }
-            if (!*p2)
-                exit_program(1);
+            if (!*p2){
+                //exit_program(1);
+                return -1;
+            }
+
             p2++;
 
             if (!strcmp(key, "title")) {
@@ -14296,7 +15192,8 @@ loop_end:
                 av_program_add_stream_index(oc, progid, st_num);
             } else {
                 av_log(NULL, AV_LOG_FATAL, "Unknown program key %s.\n", key);
-                exit_program(1);
+                //exit_program(1);
+                return -1;
             }
             av_freep(&to_dealloc);
             av_freep(&key);
@@ -14321,11 +15218,16 @@ loop_end:
         if (!val) {
             av_log(NULL, AV_LOG_FATAL, "No '=' character in metadata string %s.\n",
                    o->metadata[i].u.str);
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
         *val++ = 0;
 
-        parse_meta_type(o->metadata[i].specifier, &type, &index, &stream_spec);
+        ret = parse_meta_type(o->metadata[i].specifier, &type, &index, &stream_spec);
+        if(ret < 0){
+            //exit_program(1);
+            return -1;
+        }
         if (type == 's') {
             for (j = 0; j < oc->nb_streams; j++) {
                 ost = output_streams[nb_output_streams - oc->nb_streams + j];
@@ -14340,8 +15242,10 @@ loop_end:
                     } else {
                         av_dict_set(&oc->streams[j]->metadata, (const char *)o->metadata[i].u.str, *val ? val : NULL, 0);
                     }
-                } else if (ret < 0)
-                    exit_program(1);
+                } else if (ret < 0){
+                    //exit_program(1);
+                    return -1;
+                }
             }
         }
         else {
@@ -14352,20 +15256,23 @@ loop_end:
             case 'c':
                 if (index < 0 || index >= oc->nb_chapters) {
                     av_log(NULL, AV_LOG_FATAL, "Invalid chapter index %d in metadata specifier.\n", index);
-                    exit_program(1);
+                    //exit_program(1);
+                    return -1;
                 }
                 m = &oc->chapters[index]->metadata;
                 break;
             case 'p':
                 if (index < 0 || index >= oc->nb_programs) {
                     av_log(NULL, AV_LOG_FATAL, "Invalid program index %d in metadata specifier.\n", index);
-                    exit_program(1);
+                    //exit_program(1);
+                    return -1;
                 }
                 m = &oc->programs[index]->metadata;
                 break;
             default:
                 av_log(NULL, AV_LOG_FATAL, "Invalid metadata specifier %s.\n", o->metadata[i].specifier);
-                exit_program(1);
+                //exit_program(1);
+                return -1;
             }
             av_dict_set(m, (const char *)o->metadata[i].u.str, *val ? val : NULL, 0);
         }
@@ -14388,7 +15295,7 @@ int FFmpegMedia::open_output_file_ex(void* arg, OptionsContext *o, const char *f
  *      可看init_simple_filtergraph函数对FilterGraph **filtergraphs的初始化。
  * @return 成功=void； 失败=程序退出
 */
-void FFmpegMedia::check_filter_outputs(void)
+int FFmpegMedia::check_filter_outputs(void)
 {
     int i;
     //1. 遍历系统过滤器数组
@@ -14399,10 +15306,13 @@ void FFmpegMedia::check_filter_outputs(void)
             OutputFilter *output = filtergraphs[i]->outputs[n];
             if (!output->ost) {
                 av_log(NULL, AV_LOG_FATAL, "Filter %s has an unconnected output\n", output->name);
-                exit_program(1);
+                //exit_program(1);
+                return -1;
             }
         }
     }
+
+    return 0;
 }
 
 void FFmpegMedia::uninit_opts(void)
@@ -14513,11 +15423,11 @@ int FFmpegMedia::ffmpeg_parse_options(int argc, char **argv){
     /* 5. create the complex filtergraphs-创建复杂的过滤图 */
     // 推流模块没用到滤镜，后续再将滤镜相关.
     // 没用到的话，nb_filtergraphs=0，内部不会没有任何处理
-//    ret = init_complex_filters();
-//    if (ret < 0) {
-//        av_log(NULL, AV_LOG_FATAL, "Error initializing complex filters.\n");
-//        goto fail;
-//    }
+    ret = init_complex_filters();
+    if (ret < 0) {
+        av_log(NULL, AV_LOG_FATAL, "Error initializing complex filters.\n");
+        goto fail;
+    }
 
     // 6. 打开一个或者多个输出文件.
     /* open output files */
@@ -14527,12 +15437,16 @@ int FFmpegMedia::ffmpeg_parse_options(int argc, char **argv){
         goto fail;
     }
 
-    check_filter_outputs();
+    ret = check_filter_outputs();
+    if (ret < 0) {
+        av_log(NULL, AV_LOG_FATAL, "Error check_filter_outputs files: ");
+        goto fail;
+    }
 
 fail:
     uninit_parse_context(&octx);
     if (ret < 0) {
-        av_strerror(ret, (char *)error, sizeof(error));
+        av_strerror(ret, (char *)error, sizeof(error));// 上面一些错误返回值是-1,传进该函数不准确,忽略即可
         av_log(NULL, AV_LOG_FATAL, "%s\n", error);
     }
     return ret;

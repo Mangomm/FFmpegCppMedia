@@ -5,8 +5,16 @@
 #include <mutex>
 #include <condition_variable>
 #include <memory>
+#include <string>
 
 namespace HCMFFmpegMedia {
+
+typedef struct FMMessage{
+    int what;
+    std::string ifilename;
+    std::string ofilename;
+} FMMessage;
+
 
 template<typename T>
 class Queue
@@ -123,6 +131,15 @@ public:
     void notify_one()
     {
         _data_cond.notify_one();
+    }
+
+    void clear()
+    {
+        std::lock_guard<std::mutex> lock(_mut);
+        while (!_data_queue.empty()) {
+            _data_queue.pop();
+            //delete xxx; 智能指针不需要处理,引用计数为0时会自动回收
+        }
     }
 
 private:
