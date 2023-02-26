@@ -83,18 +83,18 @@ namespace HCMFFmpegMedia {
  * 例如用户传入：-vcodec libx265 -vcodec libx264，此时假设st是视频流，虽然h265,h264都是属于视频流类型的编解码器，但是只会返回用户最后一个
  * 编解码器名字，即outvar="libx264"作为传出参数
  */
-#define MATCH_PER_STREAM_OPT(name, type, outvar, fmtctx, st)\
-{\
-    int i, ret;\
-    for (i = 0; i < o->nb_ ## name; i++) {\
-        char *spec = o->name[i].specifier;\
-        if ((ret = check_stream_specifier(fmtctx, st, spec)) > 0)\
-            outvar = o->name[i].u.type;\
-        else if (ret < 0)\
-            exit_program(1);\
-    }\
-}
-#define MATCH_PER_STREAM_OPT_EX(name, type, outvar, outvartype, fmtctx, st)\
+//#define MATCH_PER_STREAM_OPT(name, type, outvar, fmtctx, st)\
+//{\
+//    int i, ret;\
+//    for (i = 0; i < o->nb_ ## name; i++) {\
+//        char *spec = o->name[i].specifier;\
+//        if ((ret = check_stream_specifier(fmtctx, st, spec)) > 0)\
+//            outvar = o->name[i].u.type;\
+//        else if (ret < 0)\
+//            exit_program(1);\
+//    }\
+//}
+#define MATCH_PER_STREAM_OPT_EX(name, type, outvar, outvartype, fmtctx, st, retVal)\
 {\
     int i, ret;\
     for (i = 0; i < o->nb_ ## name; i++) {\
@@ -102,7 +102,7 @@ namespace HCMFFmpegMedia {
         if ((ret = check_stream_specifier(fmtctx, st, spec)) > 0)\
             outvar = (outvartype)o->name[i].u.type;\
         else if (ret < 0)\
-            exit_program(1);\
+            return retVal;\
     }\
 }
 
@@ -1050,7 +1050,7 @@ public:
                             int *decode_failed);
     void sub2video_flush(InputStream *ist);
     int check_output_constraints(InputStream *ist, OutputStream *ost);
-    void do_subtitle_out(OutputFile *of,
+    int /*void*/ do_subtitle_out(OutputFile *of,
                                 OutputStream *ost,
                                 AVSubtitle *sub);
     int transcode_subtitles(InputStream *ist, AVPacket *pkt, int *got_output,

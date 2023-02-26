@@ -34,8 +34,9 @@ int main(int argc, char **argv)
     auto Lambda = [=](int i){
         if(i == 1){
             FFmpegMedia tyy;
-            tyy.fm_set_input_filename("704x576-1Mbps.mp4");
-            tyy.fm_set_output_filename("rtmp://192.168.1.118:1935/live/t11");
+            //tyy.fm_set_input_filename("704x576-1Mbps.mp4");Titanic.ts
+            tyy.fm_set_input_filename("Titanic.ts");
+            tyy.fm_set_output_filename("rtmp://192.168.1.10:1935/live/t11");
             tyy.argc = argc;
             tyy.argv = argv;
             tyy.start();
@@ -43,8 +44,9 @@ int main(int argc, char **argv)
             // 简单测试推多路(用两路进行模拟)
             // 注意：命令行参数的输出文件暂时用_output_filename的值代替, 后续版本修改成函数来设置. 详细看open_files()
             FFmpegMedia tyy;
-            tyy.fm_set_input_filename("704x576-1Mbps.mp4");
-            tyy.fm_set_output_filename("rtmp://192.168.1.118:1935/live/t12");
+            //tyy.fm_set_input_filename("704x576-1Mbps.mp4");
+            tyy.fm_set_input_filename("Titanic.ts");
+            tyy.fm_set_output_filename("rtmp://192.168.1.10:1935/live/t12");
             tyy.argc = argc;
             tyy.argv = argv;
             tyy.start();

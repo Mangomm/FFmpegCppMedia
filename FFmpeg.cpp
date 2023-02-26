@@ -1003,7 +1003,7 @@ int FFmpegMedia::hw_device_setup_for_decode(InputStream *ist)
 
 void FFmpegMedia::abort_codec_experimental(AVCodec *c, int encoder)
 {
-    exit_program(1);
+    //exit_program(1);
 }
 
 /**
@@ -1833,8 +1833,10 @@ void FFmpegMedia::print_sdp(void)
     }
 
     avc = (AVFormatContext **)av_malloc_array(nb_output_files, sizeof(*avc));
-    if (!avc)
-        exit_program(1);
+    if (!avc){
+        //exit_program(1);
+        return;
+    }
     for (i = 0, j = 0; i < nb_output_files; i++) {
         if (!strcmp(output_files[i]->ctx->oformat->name, "rtp")) {
             avc[j] = output_files[i]->ctx;
@@ -3725,8 +3727,11 @@ char *FFmpegMedia::choose_pix_fmts(OutputFilter *ofilter)
         uint8_t *ret;
         int len;
 
-        if (avio_open_dyn_buf(&s) < 0)//打开一个只写的内存流
-            exit_program(1);
+        if (avio_open_dyn_buf(&s) < 0){
+            //打开一个只写的内存流
+            //exit_program(1);
+            return NULL;
+        }
 
         p = ost->enc->pix_fmts;
         if (ost->enc_ctx->strict_std_compliance <= FF_COMPLIANCE_UNOFFICIAL) {
@@ -6529,7 +6534,7 @@ int FFmpegMedia::check_output_constraints(InputStream *ist, OutputStream *ost)
     return 1;
 }
 
-void FFmpegMedia::do_subtitle_out(OutputFile *of,
+int FFmpegMedia::do_subtitle_out(OutputFile *of,
                             OutputStream *ost,
                             AVSubtitle *sub)
 {
@@ -6538,12 +6543,15 @@ void FFmpegMedia::do_subtitle_out(OutputFile *of,
     AVCodecContext *enc;
     AVPacket pkt;
     int64_t pts;
+    int ret;
 
     if (sub->pts == AV_NOPTS_VALUE) {
         av_log(NULL, AV_LOG_ERROR, "Subtitle packets must have a pts\n");
-        if (exit_on_error)
-            exit_program(1);
-        return;
+        if (exit_on_error){
+            //exit_program(1);
+            return -1;
+        }
+        return 0;// ffmpeg本身没指定exit_on_error，不会退出
     }
 
     enc = ost->enc_ctx;
@@ -6552,7 +6560,8 @@ void FFmpegMedia::do_subtitle_out(OutputFile *of,
         subtitle_out = (uint8_t *)av_malloc(subtitle_out_max_size);
         if (!subtitle_out) {
             av_log(NULL, AV_LOG_FATAL, "Failed to allocate subtitle_out\n");
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
     }
 
@@ -6573,7 +6582,7 @@ void FFmpegMedia::do_subtitle_out(OutputFile *of,
 
         ost->sync_opts = av_rescale_q(pts, AV_TIME_BASE_Q, enc->time_base);
         if (!check_recording_time(ost))
-            return;
+            return 0;// ffmpeg本身不会退出
 
         sub->pts = pts;
         // start_display_time is required to be 0
@@ -6591,7 +6600,8 @@ void FFmpegMedia::do_subtitle_out(OutputFile *of,
             sub->num_rects = save_num_rects;
         if (subtitle_out_size < 0) {
             av_log(NULL, AV_LOG_FATAL, "Subtitle encoding failed\n");
-            exit_program(1);
+            //exit_program(1);
+            return -1;
         }
 
         av_init_packet(&pkt);
@@ -6608,7 +6618,11 @@ void FFmpegMedia::do_subtitle_out(OutputFile *of,
                 pkt.pts += av_rescale_q(sub->end_display_time, (AVRational){ 1, 1000 }, ost->mux_timebase);
         }
         pkt.dts = pkt.pts;
-        output_packet(of, &pkt, ost, 0);
+        ret = output_packet(of, &pkt, ost, 0);
+        if(ret < 0){
+            av_log(NULL, AV_LOG_ERROR, "output_packet failed, ret: %d\n", ret);
+            return ret;
+        }
     }
 }
 
@@ -6620,7 +6634,10 @@ int FFmpegMedia::transcode_subtitles(InputStream *ist, AVPacket *pkt, int *got_o
     int i, ret = avcodec_decode_subtitle2(ist->dec_ctx,
                                           &subtitle, got_output, pkt);
 
-    check_decode_result(NULL, got_output, ret);
+    //check_decode_result(NULL, got_output, ret);
+    if(check_decode_result(NULL, got_output, ret) < 0){
+        return ret;// ret不用更新为check_decode_result的返回值,当然更新也没问题
+    }
 
     if (ret < 0 || !*got_output) {
         *decode_failed = 1;
@@ -6657,12 +6674,16 @@ int FFmpegMedia::transcode_subtitles(InputStream *ist, AVPacket *pkt, int *got_o
     } else if (ist->nb_filters) {
         if (!ist->sub2video.sub_queue)
             ist->sub2video.sub_queue = av_fifo_alloc(8 * sizeof(AVSubtitle));
-        if (!ist->sub2video.sub_queue)
-            exit_program(1);
+        if (!ist->sub2video.sub_queue){
+            //exit_program(1);
+            return -1;
+        }
         if (!av_fifo_space(ist->sub2video.sub_queue)) {
             ret = av_fifo_realloc2(ist->sub2video.sub_queue, 2 * av_fifo_size(ist->sub2video.sub_queue));
-            if (ret < 0)
-                exit_program(1);
+            if (ret < 0){
+                //exit_program(1);
+                return -1;
+            }
         }
         av_fifo_generic_write(ist->sub2video.sub_queue, &subtitle, sizeof(subtitle), NULL);
         free_sub = 0;
@@ -11593,7 +11614,7 @@ AVCodec *FFmpegMedia::choose_decoder(OptionsContext *o, AVFormatContext *s, AVSt
     char *codec_name = NULL;
 
     //MATCH_PER_STREAM_OPT(codec_names, str, codec_name, s, st);// 判断音视频类型是否与流一致.例如-vcodec libx264,这里是判断'v'是否与st的codec_type一致
-    MATCH_PER_STREAM_OPT_EX(codec_names, str, codec_name, char*, s, st);
+    MATCH_PER_STREAM_OPT_EX(codec_names, str, codec_name, char*, s, st, nullptr);
     if (codec_name) {
         AVCodec *codec = find_codec_or_die(codec_name, st->codecpar->codec_type, 0);// 判断解码器是否被ffmpeg支持.例如-vcodec libx264,这里是判断 libx264是否被ffmpeg支持
         if(!codec){
@@ -11829,13 +11850,15 @@ int FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
         ist->max_pts = INT64_MIN;
 
         ist->ts_scale = 1.0;
-        MATCH_PER_STREAM_OPT(ts_scale, dbl, ist->ts_scale, ic, st);
+        //MATCH_PER_STREAM_OPT(ts_scale, dbl, ist->ts_scale, ic, st);
+        MATCH_PER_STREAM_OPT_EX(ts_scale, dbl, ist->ts_scale, double, ic, st, -1);
 
         ist->autorotate = 1;
-        MATCH_PER_STREAM_OPT(autorotate, i, ist->autorotate, ic, st);
+        //MATCH_PER_STREAM_OPT(autorotate, i, ist->autorotate, ic, st);
+        MATCH_PER_STREAM_OPT_EX(autorotate, i, ist->autorotate, int, ic, st, -1);
 
         //MATCH_PER_STREAM_OPT(codec_tags, str, codec_tag, ic, st);
-        MATCH_PER_STREAM_OPT_EX(codec_tags, str, codec_tag, char *, ic, st);
+        MATCH_PER_STREAM_OPT_EX(codec_tags, str, codec_tag, char *, ic, st, -1);
         if (codec_tag) {
             //strtlo see https://blog.csdn.net/weixin_37921201/article/details/119718403
             uint32_t tag = strtol(codec_tag, &next, 0);// next指向非法字符串开始及后面的字符串.
@@ -11855,10 +11878,11 @@ int FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
         ist->decoder_opts = filter_codec_opts(o->g->codec_opts, ist->st->codecpar->codec_id, ic, st, ist->dec);
 
         ist->reinit_filters = -1;
-        MATCH_PER_STREAM_OPT(reinit_filters, i, ist->reinit_filters, ic, st);
+        //MATCH_PER_STREAM_OPT(reinit_filters, i, ist->reinit_filters, ic, st);
+        MATCH_PER_STREAM_OPT_EX(reinit_filters, i, ist->reinit_filters, int, ic, st, -1);
 
         //MATCH_PER_STREAM_OPT(discard, str, discard_str, ic, st);
-        MATCH_PER_STREAM_OPT_EX(discard, str, discard_str, char *, ic, st);
+        MATCH_PER_STREAM_OPT_EX(discard, str, discard_str, char *, ic, st, -1);
         ist->user_set_discard = AVDISCARD_NONE;/*默认该流是不丢弃的*/
 
         // 5. 判断是否丢弃该流.-vn,-an,-sn这些选项.
@@ -11918,7 +11942,7 @@ int FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
             ist->dec_ctx->framerate = st->avg_frame_rate;
 
             //MATCH_PER_STREAM_OPT(frame_rates, str, framerate, ic, st);
-            MATCH_PER_STREAM_OPT_EX(frame_rates, str, framerate, char *, ic, st);
+            MATCH_PER_STREAM_OPT_EX(frame_rates, str, framerate, char *, ic, st, -1);
             if (framerate && av_parse_video_rate(&ist->framerate,
                                                  framerate) < 0) {
                 av_log(NULL, AV_LOG_ERROR, "Error parsing framerate %s.\n",
@@ -11928,13 +11952,13 @@ int FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
             }
 
             ist->top_field_first = -1;
-            MATCH_PER_STREAM_OPT(top_field_first, i, ist->top_field_first, ic, st);
+            MATCH_PER_STREAM_OPT_EX(top_field_first, i, ist->top_field_first, int, ic, st, -1);
 
             // 硬件加速相关.
             // 寻找硬件设备的id
             // 可参考https://blog.csdn.net/u012117034/article/details/123470108
             //MATCH_PER_STREAM_OPT(hwaccels, str, hwaccel, ic, st);
-            MATCH_PER_STREAM_OPT_EX(hwaccels, str, hwaccel, const char *, ic, st);
+            MATCH_PER_STREAM_OPT_EX(hwaccels, str, hwaccel, const char *, ic, st, -1);
             if (hwaccel) {
                 // The NVDEC hwaccels use a CUDA device, so remap the name here.
                 // NVDEC hwaccels使用CUDA设备，所以在这里重新映射名称。
@@ -11993,7 +12017,7 @@ int FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
 
             // 保存硬件设备名？
             //MATCH_PER_STREAM_OPT(hwaccel_devices, str, hwaccel_device, ic, st);
-            MATCH_PER_STREAM_OPT_EX(hwaccel_devices, str, hwaccel_device, char *, ic, st);
+            MATCH_PER_STREAM_OPT_EX(hwaccel_devices, str, hwaccel_device, char *, ic, st, -1);
             if (hwaccel_device) {
                 ist->hwaccel_device = av_strdup(hwaccel_device);
                 if (!ist->hwaccel_device){
@@ -12006,7 +12030,7 @@ int FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
             //MATCH_PER_STREAM_OPT(hwaccel_output_formats, str,
                                  //hwaccel_output_format, ic, st);
             MATCH_PER_STREAM_OPT_EX(hwaccel_output_formats, str,
-                                 hwaccel_output_format, char *, ic, st);
+                                 hwaccel_output_format, char *, ic, st, -1);
             if (hwaccel_output_format) {
                 ist->hwaccel_output_format = av_get_pix_fmt(hwaccel_output_format);
                 if (ist->hwaccel_output_format == AV_PIX_FMT_NONE) {
@@ -12022,7 +12046,7 @@ int FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
             break;
         case AVMEDIA_TYPE_AUDIO:
             ist->guess_layout_max = INT_MAX;
-            MATCH_PER_STREAM_OPT(guess_layout_max, i, ist->guess_layout_max, ic, st);
+            MATCH_PER_STREAM_OPT_EX(guess_layout_max, i, ist->guess_layout_max, int, ic, st, -1);
             guess_input_channel_layout(ist);// 设置通道布局到ist中
             break;
         case AVMEDIA_TYPE_DATA:
@@ -12030,9 +12054,9 @@ int FFmpegMedia::add_input_streams(OptionsContext *o, AVFormatContext *ic)
             char *canvas_size = NULL;
             if(!ist->dec)// 一般在choose_decoder时已经找到
                 ist->dec = avcodec_find_decoder(par->codec_id);
-            MATCH_PER_STREAM_OPT(fix_sub_duration, i, ist->fix_sub_duration, ic, st);
+            MATCH_PER_STREAM_OPT_EX(fix_sub_duration, i, ist->fix_sub_duration, int, ic, st, -1);
             //MATCH_PER_STREAM_OPT(canvas_sizes, str, canvas_size, ic, st);
-            MATCH_PER_STREAM_OPT_EX(canvas_sizes, str, canvas_size, char *, ic, st);
+            MATCH_PER_STREAM_OPT_EX(canvas_sizes, str, canvas_size, char *, ic, st, -1);
             // av_parse_video_size:解析字符串canvas_size，并将值赋值给参1、参2
             if (canvas_size &&
                 av_parse_video_size(&ist->dec_ctx->width, &ist->dec_ctx->height, canvas_size) < 0) {
@@ -12685,7 +12709,7 @@ int FFmpegMedia::choose_encoder(OptionsContext *o, AVFormatContext *s, OutputStr
     if (type == AVMEDIA_TYPE_VIDEO || type == AVMEDIA_TYPE_AUDIO || type == AVMEDIA_TYPE_SUBTITLE) {
         /*2.获取用户指定输出的编码类型*/
         //MATCH_PER_STREAM_OPT(codec_names, str, codec_name, s, ost->st);
-        MATCH_PER_STREAM_OPT_EX(codec_names, str, codec_name, char *, s, ost->st);
+        MATCH_PER_STREAM_OPT_EX(codec_names, str, codec_name, char *, s, ost->st, -1);
         /*2.1若用户没指定，则通过stream的编码器id查找*/
         if (!codec_name) {
             /*av_guess_codec: 猜测编解码器id,依赖oc->oformat->name(-f参数，例如flv)以及文件名.
@@ -12850,7 +12874,7 @@ OutputStream *FFmpegMedia::new_output_stream(OptionsContext *o, AVFormatContext 
 
         //该presets应该与选项-preset veryfast无关因为-preset是被存放在o->g->codec_opts中.故这里后续分析
         //MATCH_PER_STREAM_OPT(presets, str, preset, oc, st);
-        MATCH_PER_STREAM_OPT_EX(presets, str, preset, char *, oc, st);
+        MATCH_PER_STREAM_OPT_EX(presets, str, preset, char *, oc, st, nullptr);
         if (preset && (!(ret = get_preset_file_2(preset, ost->enc->name, &s)))) {
             do  {
                 buf = (char *)get_line(s);
@@ -12902,7 +12926,7 @@ OutputStream *FFmpegMedia::new_output_stream(OptionsContext *o, AVFormatContext 
      @param[in] log_ctx 父日志上下文
      @return >= 0表示成功，否则返回负的错误码 **/
     //MATCH_PER_STREAM_OPT(time_bases, str, time_base, oc, st);
-    MATCH_PER_STREAM_OPT_EX(time_bases, str, time_base, const char *, oc, st);
+    MATCH_PER_STREAM_OPT_EX(time_bases, str, time_base, const char *, oc, st, nullptr);
     if (time_base) {
         AVRational q;
         if (av_parse_ratio(&q, time_base, INT_MAX, 0, NULL) < 0 ||
@@ -12917,7 +12941,7 @@ OutputStream *FFmpegMedia::new_output_stream(OptionsContext *o, AVFormatContext 
 
     /*是否设置编码时的时基，一般不设置默认是{0,0}*/
     //MATCH_PER_STREAM_OPT(enc_time_bases, str, time_base, oc, st);
-    MATCH_PER_STREAM_OPT_EX(enc_time_bases, str, time_base, const char *, oc, st);
+    MATCH_PER_STREAM_OPT_EX(enc_time_bases, str, time_base, const char *, oc, st, nullptr);
     if (time_base) {
         AVRational q;
         if (av_parse_ratio(&q, time_base, INT_MAX, 0, NULL) < 0 ||
@@ -12932,7 +12956,7 @@ OutputStream *FFmpegMedia::new_output_stream(OptionsContext *o, AVFormatContext 
     /*-frames选项？暂时未遇到，不过应该与截图相关*/
     //对应参数"frames"，"vframes"，设置输出的帧数。
     ost->max_frames = INT64_MAX;
-    MATCH_PER_STREAM_OPT(max_frames, i64, ost->max_frames, oc, st);
+    MATCH_PER_STREAM_OPT_EX(max_frames, i64, ost->max_frames, int64_t, oc, st, nullptr);
     for (i = 0; i<o->nb_max_frames; i++) {
         char *p = o->max_frames[i].specifier;
         if (!*p && type != AVMEDIA_TYPE_VIDEO) {
@@ -12943,12 +12967,12 @@ OutputStream *FFmpegMedia::new_output_stream(OptionsContext *o, AVFormatContext 
 
     //对应参数"copypriorss"，"copy or discard frames before start time"
     ost->copy_prior_start = -1;
-    MATCH_PER_STREAM_OPT(copy_prior_start, i, ost->copy_prior_start, oc ,st);
+    MATCH_PER_STREAM_OPT_EX(copy_prior_start, i, ost->copy_prior_start, int, oc, st, nullptr);
 
     //对应参数"bsf"，"absf"，"vbsf"
     /*这里应该与转码+滤镜相关，后续详细分析，可简单参考https://www.cnblogs.com/zhibei/p/12551810.html*/
     //MATCH_PER_STREAM_OPT(bitstream_filters, str, bsfs, oc, st);
-    MATCH_PER_STREAM_OPT_EX(bitstream_filters, str, bsfs, const char *, oc, st);
+    MATCH_PER_STREAM_OPT_EX(bitstream_filters, str, bsfs, const char *, oc, st, nullptr);
     while (bsfs && *bsfs) {
         const AVBitStreamFilter *filter;
         char *bsf, *bsf_options_str, *bsf_name;
@@ -13010,7 +13034,7 @@ OutputStream *FFmpegMedia::new_output_stream(OptionsContext *o, AVFormatContext 
 
     //对应参数"tag"
     //MATCH_PER_STREAM_OPT(codec_tags, str, codec_tag, oc, st);
-    MATCH_PER_STREAM_OPT_EX(codec_tags, str, codec_tag, char *, oc, st);
+    MATCH_PER_STREAM_OPT_EX(codec_tags, str, codec_tag, char *, oc, st, nullptr);
     if (codec_tag) {
         uint32_t tag = strtol(codec_tag, &next, 0);
         if (*next)
@@ -13021,7 +13045,7 @@ OutputStream *FFmpegMedia::new_output_stream(OptionsContext *o, AVFormatContext 
 
     //对应参数"qscale:[v:a:s:d]"/"q" 以<数值>质量为基础的VBR，取值0.01-255，越小质量越好
     /*qscale、disposition、max_muxing_queue_size暂时未研究*/
-    MATCH_PER_STREAM_OPT(qscale, dbl, qscale, oc, st);
+    MATCH_PER_STREAM_OPT_EX(qscale, dbl, qscale, double, oc, st, nullptr);
     if (qscale >= 0) {
         ost->enc_ctx->flags |= AV_CODEC_FLAG_QSCALE;
         ost->enc_ctx->global_quality = FF_QP2LAMBDA * qscale;
@@ -13029,11 +13053,11 @@ OutputStream *FFmpegMedia::new_output_stream(OptionsContext *o, AVFormatContext 
 
     //对应参数"disposition"
     //MATCH_PER_STREAM_OPT(disposition, str, ost->disposition, oc, st);
-    MATCH_PER_STREAM_OPT_EX(disposition, str, ost->disposition, char *, oc, st);
+    MATCH_PER_STREAM_OPT_EX(disposition, str, ost->disposition, char *, oc, st, nullptr);
     ost->disposition = av_strdup(ost->disposition);
 
     ost->max_muxing_queue_size = 128;
-    MATCH_PER_STREAM_OPT(max_muxing_queue_size, i, ost->max_muxing_queue_size, oc, st);
+    MATCH_PER_STREAM_OPT_EX(max_muxing_queue_size, i, ost->max_muxing_queue_size, int, oc, st, nullptr);
     ost->max_muxing_queue_size *= sizeof(AVPacket);
 
     /*编码器设置全局头，一般推rtmp都会默认设置*/
@@ -13213,7 +13237,7 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
 
     /*获取帧率-r选项*/
     //MATCH_PER_STREAM_OPT(frame_rates, str, frame_rate, oc, st);
-    MATCH_PER_STREAM_OPT_EX(frame_rates, str, frame_rate, char *, oc, st);
+    MATCH_PER_STREAM_OPT_EX(frame_rates, str, frame_rate, char *, oc, st, nullptr);
     if (frame_rate && av_parse_video_rate(&ost->frame_rate, frame_rate) < 0) {
         av_log(NULL, AV_LOG_FATAL, "Invalid framerate value: %s\n", frame_rate);
         //exit_program(1);
@@ -13228,7 +13252,7 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
     /*aspect可以是浮点数字的字符串，或一个字符串的比值，比值分别是纵横比的分子和分母。
      For example "4:3", "16:9", "1.3333", and "1.7777" are valid argument values.*/
     //MATCH_PER_STREAM_OPT(frame_aspect_ratios, str, frame_aspect_ratio, oc, st);
-    MATCH_PER_STREAM_OPT_EX(frame_aspect_ratios, str, frame_aspect_ratio, char *, oc, st);
+    MATCH_PER_STREAM_OPT_EX(frame_aspect_ratios, str, frame_aspect_ratio, char *, oc, st, nullptr);
     if (frame_aspect_ratio) {
         AVRational q;
         if (av_parse_ratio(&q, frame_aspect_ratio, 255, 0, NULL) < 0 ||
@@ -13244,9 +13268,9 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
     /*过滤器相关*/
     /*对应参数"filter_script"和"filter"*/
     //MATCH_PER_STREAM_OPT(filter_scripts, str, ost->filters_script, oc, st);//new_audio_stream也会调用到
-    MATCH_PER_STREAM_OPT_EX(filter_scripts, str, ost->filters_script, char *, oc, st);
+    MATCH_PER_STREAM_OPT_EX(filter_scripts, str, ost->filters_script, char *, oc, st, nullptr);
     //MATCH_PER_STREAM_OPT(filters,        str, ost->filters,        oc, st);
-    MATCH_PER_STREAM_OPT_EX(filters,        str, ost->filters, char *,       oc, st);
+    MATCH_PER_STREAM_OPT_EX(filters,        str, ost->filters, char *,       oc, st, nullptr);
     if (o->nb_filters > 1)
         av_log(NULL, AV_LOG_ERROR, "Only '-vf %s' read, ignoring remaining -vf options: Use ',' to separate filters\n", ost->filters);
 
@@ -13262,7 +13286,7 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
 
         /*解析-s分辨率选项到编解码器上下文video_enc中*/
         //MATCH_PER_STREAM_OPT(frame_sizes, str, frame_size, oc, st);
-        MATCH_PER_STREAM_OPT_EX(frame_sizes, str, frame_size, char *, oc, st);
+        MATCH_PER_STREAM_OPT_EX(frame_sizes, str, frame_size, char *, oc, st, nullptr);
         if (frame_size && av_parse_video_size(&video_enc->width, &video_enc->height, frame_size) < 0) {
             av_log(NULL, AV_LOG_FATAL, "Invalid frame size: %s.\n", frame_size);
             //exit_program(1);
@@ -13274,7 +13298,7 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
         video_enc->bits_per_raw_sample = frame_bits_per_raw_sample;
         /*对应参数"pix_fmt"，视频帧格式，暂未研究，但是平时比较常用*/
         //MATCH_PER_STREAM_OPT(frame_pix_fmts, str, frame_pix_fmt, oc, st);
-        MATCH_PER_STREAM_OPT_EX(frame_pix_fmts, str, frame_pix_fmt, char *, oc, st);
+        MATCH_PER_STREAM_OPT_EX(frame_pix_fmts, str, frame_pix_fmt, char *, oc, st, nullptr);
         if (frame_pix_fmt && *frame_pix_fmt == '+') {
             ost->keep_pix_fmt = 1;
             if (!*++frame_pix_fmt)
@@ -13296,7 +13320,7 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
         /*以下三个矩阵相关的参数暂未研究.推流没用到，读者有兴趣可自行研究*/
         //对应参数"intra_matrix"
         //MATCH_PER_STREAM_OPT(intra_matrices, str, intra_matrix, oc, st);
-        MATCH_PER_STREAM_OPT_EX(intra_matrices, str, intra_matrix, char *, oc, st);
+        MATCH_PER_STREAM_OPT_EX(intra_matrices, str, intra_matrix, char *, oc, st, nullptr);
         if (intra_matrix) {
             if (!(video_enc->intra_matrix = (uint16_t *)av_mallocz(sizeof(*video_enc->intra_matrix) * 64))) {
                 av_log(NULL, AV_LOG_FATAL, "Could not allocate memory for intra matrix.\n");
@@ -13311,7 +13335,7 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
         }
         //对应参数"chroma_intra_matrix"
         //MATCH_PER_STREAM_OPT(chroma_intra_matrices, str, chroma_intra_matrix, oc, st);
-        MATCH_PER_STREAM_OPT_EX(chroma_intra_matrices, str, chroma_intra_matrix, char *, oc, st);
+        MATCH_PER_STREAM_OPT_EX(chroma_intra_matrices, str, chroma_intra_matrix, char *, oc, st, nullptr);
         if (chroma_intra_matrix) {
             uint16_t *p = (uint16_t *)av_mallocz(sizeof(*video_enc->chroma_intra_matrix) * 64);
             if (!p) {
@@ -13328,7 +13352,7 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
         }
         //对应参数"inter_matrix"
         //MATCH_PER_STREAM_OPT(inter_matrices, str, inter_matrix, oc, st);
-        MATCH_PER_STREAM_OPT_EX(inter_matrices, str, inter_matrix, char *, oc, st);
+        MATCH_PER_STREAM_OPT_EX(inter_matrices, str, inter_matrix, char *, oc, st, nullptr);
         if (inter_matrix) {
             if (!(video_enc->inter_matrix = (uint16_t *)av_mallocz(sizeof(*video_enc->inter_matrix) * 64))) {
                 av_log(NULL, AV_LOG_FATAL, "Could not allocate memory for inter matrix.\n");
@@ -13349,7 +13373,7 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
         速率控制，覆盖指定的时间间隔，以'逗号分隔的int,int,int'列表格式。
         前两个值是开始和结束的帧号，最后一个如果是整数，表示用量。如果是负数表示品质因素*/
         //MATCH_PER_STREAM_OPT(rc_overrides, str, p, oc, st);
-        MATCH_PER_STREAM_OPT_EX(rc_overrides, str, p, const char *, oc, st);
+        MATCH_PER_STREAM_OPT_EX(rc_overrides, str, p, const char *, oc, st, nullptr);
         for (i = 0; p; i++) {
             int start, end, q;
             int e = sscanf(p, "%d,%d,%d", &start, &end, &q);
@@ -13390,7 +13414,7 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
 
         /* two pass mode */
         /*do_passs参数暂未研究.推流没用到*/
-        MATCH_PER_STREAM_OPT(pass, i, do_pass, oc, st);
+        MATCH_PER_STREAM_OPT_EX(pass, i, do_pass, int, oc, st, nullptr);
         if (do_pass) {
             if (do_pass & 1) {
                 video_enc->flags |= AV_CODEC_FLAG_PASS1;
@@ -13405,7 +13429,7 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
         /*passlogfile参数暂未研究.推流没用到*/
         //对应参数“passlogfile”
         //MATCH_PER_STREAM_OPT(passlogfiles, str, ost->logfile_prefix, oc, st);
-        MATCH_PER_STREAM_OPT_EX(passlogfiles, str, ost->logfile_prefix, char *, oc, st);
+        MATCH_PER_STREAM_OPT_EX(passlogfiles, str, ost->logfile_prefix, char *, oc, st, nullptr);
         if (ost->logfile_prefix &&
             !(ost->logfile_prefix = av_strdup(ost->logfile_prefix))){
             //exit_program(1);
@@ -13463,18 +13487,18 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
         ‘-force_key_frames[:stream_specifier] expr:expr (output,per-stream)’在指定的时间戳强制关键帧
         */
         //MATCH_PER_STREAM_OPT(forced_key_frames, str, ost->forced_keyframes, oc, st);
-        MATCH_PER_STREAM_OPT_EX(forced_key_frames, str, ost->forced_keyframes, char *, oc, st);
+        MATCH_PER_STREAM_OPT_EX(forced_key_frames, str, ost->forced_keyframes, char *, oc, st, nullptr);
         if (ost->forced_keyframes)
             ost->forced_keyframes = av_strdup(ost->forced_keyframes);
 
         /*该参数暂未研究.*/
         //对应参数"force_fps"，强制设置视频帧率
-        MATCH_PER_STREAM_OPT(force_fps, i, ost->force_fps, oc, st);
+        MATCH_PER_STREAM_OPT_EX(force_fps, i, ost->force_fps, int, oc, st, nullptr);
 
         /*该参数暂未研究.*/
         //对应参数"top"
         ost->top_field_first = -1;
-        MATCH_PER_STREAM_OPT(top_field_first, i, ost->top_field_first, oc, st);
+        MATCH_PER_STREAM_OPT_EX(top_field_first, i, ost->top_field_first, int, oc, st, nullptr);
 
         /*get_ost_filters流程很简单*/
         ost->avfilter = get_ost_filters(o, oc, ost);
@@ -13487,7 +13511,7 @@ OutputStream *FFmpegMedia::new_video_stream(OptionsContext *o, AVFormatContext *
         /*未研究过该参数*/
         //流拷贝，不需要重新编码的处理
         //对应参数"copyinkf"，复制初始非关键帧
-        MATCH_PER_STREAM_OPT(copy_initial_nonkeyframes, i, ost->copy_initial_nonkeyframes, oc ,st);
+        MATCH_PER_STREAM_OPT_EX(copy_initial_nonkeyframes, i, ost->copy_initial_nonkeyframes, int, oc, st, nullptr);
     }
 
     /*3.不转码流程*/
@@ -13643,8 +13667,8 @@ OutputStream *FFmpegMedia::new_audio_stream(OptionsContext *o, AVFormatContext *
 
     //MATCH_PER_STREAM_OPT(filter_scripts, str, ost->filters_script, oc, st);
     //MATCH_PER_STREAM_OPT(filters,        str, ost->filters,        oc, st);
-    MATCH_PER_STREAM_OPT_EX(filter_scripts, str, ost->filters_script, char *, oc, st);
-    MATCH_PER_STREAM_OPT_EX(filters,        str, ost->filters,        char *, oc, st);
+    MATCH_PER_STREAM_OPT_EX(filter_scripts, str, ost->filters_script, char *, oc, st, nullptr);
+    MATCH_PER_STREAM_OPT_EX(filters,        str, ost->filters,        char *, oc, st, nullptr);
     if (o->nb_filters > 1)
         av_log(NULL, AV_LOG_ERROR, "Only '-af %s' read, ignoring remaining -af options: Use ',' to separate filters\n", ost->filters);
 
@@ -13660,11 +13684,11 @@ OutputStream *FFmpegMedia::new_audio_stream(OptionsContext *o, AVFormatContext *
         char *sample_fmt = NULL;
 
         /*-ac通道号选项*/
-        MATCH_PER_STREAM_OPT(audio_channels, i, audio_enc->channels, oc, st);
+        MATCH_PER_STREAM_OPT_EX(audio_channels, i, audio_enc->channels, int, oc, st, nullptr);
 
         /*-sample_fmt采样格式选项，例如s16p*/
         //MATCH_PER_STREAM_OPT(sample_fmts, str, sample_fmt, oc, st);
-        MATCH_PER_STREAM_OPT_EX(sample_fmts, str, sample_fmt, char *, oc, st);
+        MATCH_PER_STREAM_OPT_EX(sample_fmts, str, sample_fmt, char *, oc, st, nullptr);
         if (sample_fmt &&
             (audio_enc->sample_fmt = av_get_sample_fmt(sample_fmt)) == AV_SAMPLE_FMT_NONE) {
             av_log(NULL, AV_LOG_FATAL, "Invalid sample format '%s'\n", sample_fmt);
@@ -13674,10 +13698,10 @@ OutputStream *FFmpegMedia::new_audio_stream(OptionsContext *o, AVFormatContext *
         }
 
         /*-ar采样率选项*/
-        MATCH_PER_STREAM_OPT(audio_sample_rate, i, audio_enc->sample_rate, oc, st);
+        MATCH_PER_STREAM_OPT_EX(audio_sample_rate, i, audio_enc->sample_rate, int, oc, st, nullptr);
 
         //MATCH_PER_STREAM_OPT(apad, str, ost->apad, oc, st);
-        MATCH_PER_STREAM_OPT_EX(apad, str, ost->apad, char *, oc, st);
+        MATCH_PER_STREAM_OPT_EX(apad, str, ost->apad, char *, oc, st, nullptr);
         ost->apad = av_strdup(ost->apad);
 
         /*获取音视频过滤器描述*/
@@ -13767,7 +13791,7 @@ OutputStream *FFmpegMedia::new_subtitle_stream(OptionsContext *o, AVFormatContex
 
     subtitle_enc->codec_type = AVMEDIA_TYPE_SUBTITLE;
 
-    MATCH_PER_STREAM_OPT(copy_initial_nonkeyframes, i, ost->copy_initial_nonkeyframes, oc, st);
+    MATCH_PER_STREAM_OPT_EX(copy_initial_nonkeyframes, i, ost->copy_initial_nonkeyframes, int, oc, st, nullptr);
 
     /*2.若转码，则进入if*/
     if (!ost->stream_copy) {
@@ -13775,7 +13799,7 @@ OutputStream *FFmpegMedia::new_subtitle_stream(OptionsContext *o, AVFormatContex
 
         /*这里看到，若输入了-s选项，字幕也会使用*/
         //MATCH_PER_STREAM_OPT(frame_sizes, str, frame_size, oc, st);
-        MATCH_PER_STREAM_OPT_EX(frame_sizes, str, frame_size, char *, oc, st);
+        MATCH_PER_STREAM_OPT_EX(frame_sizes, str, frame_size, char *, oc, st, nullptr);
         if (frame_size && av_parse_video_size(&subtitle_enc->width, &subtitle_enc->height, frame_size) < 0) {
             av_log(NULL, AV_LOG_FATAL, "Invalid frame size: %s.\n", frame_size);
             //exit_program(1);
