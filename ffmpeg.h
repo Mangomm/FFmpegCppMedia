@@ -727,6 +727,7 @@ private:
 public:
     int start();
     int start_async();
+    int stop_async();
     virtual void loop();
 
 public:

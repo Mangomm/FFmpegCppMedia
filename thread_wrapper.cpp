@@ -30,7 +30,9 @@ void* ThreadWrapper::transfer(void *p)
 
 int ThreadWrapper::start()
 {
-    // this指的是谁调用该函数的对象，而不是只表示ThreadWrapper的对象，例如ffmpegwrapper->start()，那么this就是ffmpegwrapper类的对象?
+    // this指的是谁调用该函数的对象，而不是只表示ThreadWrapper的对象，例如FFmpegMedia->start()，那么this就是FFmpegMedia类的对象?
+    /* 可以debug验证,FFmpegMedia继承了ThreadWrapper,当FFmpegMedia对象开启线程来到这里，this是指FFmpegMedia
+     * 而ThreadWrapper是FFmpegMedia的一部分. */
     _thread = new std::thread(transfer, this);
     if(!_thread) {
         return -1;

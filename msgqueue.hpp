@@ -149,6 +149,7 @@ private:
 };
 
 
+extern Queue<FMMessage*> g_msg_queue;
 }// HCMFFmpegMedia
 
 #endif // MSGQUEUE_HPP

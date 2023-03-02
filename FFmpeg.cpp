@@ -4893,6 +4893,11 @@ int FFmpegMedia::write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, 
         print_error("av_interleaved_write_frame()", ret);
         main_return_code = 1;
         close_all_output_streams(ost, OSTFinished(MUXER_FINISHED | ENCODER_FINISHED), ENCODER_FINISHED);
+        FMMessage *fmmsg = new FMMessage();
+        fmmsg->what = FM_MSG_INTERLEAVED_WRITE_FRAME_FAILED;
+        fmmsg->ifilename = _input_filename;
+        fmmsg->ofilename = _output_filename;
+        _msg_queue->push(fmmsg);
     }
     av_packet_unref(pkt);
 
@@ -8679,7 +8684,7 @@ int FFmpegMedia::start(){
 int FFmpegMedia::start_async(){
     int ret = ThreadWrapper::start();
     if(ret == -1){
-        printf("start_async 线程开启失败\n");
+        printf("start_async failed\n");
         return -1;
     }
 
@@ -8692,11 +8697,15 @@ void FFmpegMedia::loop(){
 //            break;
 //        }
 //    }
-    this->start();
+    int ret = 0;
+    ret = this->start();
 
-    printf("loop线程函数退出\n");
+    printf("FFmpegMedia::loop() exit, ret: %d\n", ret);
 }
 
+int FFmpegMedia::stop_async(){
+
+}
 
 /* _WIN32 means using the windows libc - cygwin doesn't define that
  * by default. HAVE_COMMANDLINETOARGVW is true on cygwin, while
