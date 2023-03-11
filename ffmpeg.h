@@ -718,7 +718,7 @@ static const OptionGroupDef groups[] = {
 class FFmpegMedia : public ThreadWrapper{
 public:
     FFmpegMedia();
-    FFmpegMedia(Queue<FMMessage*> *msgqueue);
+    FFmpegMedia(Queue<FMMessage> *msgqueue);
     virtual ~FFmpegMedia();
 
 private:
@@ -1256,7 +1256,7 @@ private:
     std::string _output_filename;
 
 private:
-    Queue<FMMessage*> *_msg_queue;      // 指向全局队列
+    Queue<FMMessage> *_msg_queue;      // 指向全局队列
 };
 //extern const OptionDef options[];
 // 硬件的后续完善

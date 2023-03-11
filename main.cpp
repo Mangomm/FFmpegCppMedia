@@ -9,7 +9,7 @@
 using namespace std;
 using namespace HCMFFmpegMedia;
 
-HCMFFmpegMedia::Queue<FMMessage*> HCMFFmpegMedia::g_msg_queue;
+HCMFFmpegMedia::Queue<FMMessage> HCMFFmpegMedia::g_msg_queue;
 
 #ifdef __cplusplus
 extern "C"{
@@ -69,6 +69,7 @@ void test_mul(int argc, char **argv){
 
 void test_msg_queue(int argc, char **argv){
     int ret = 0;
+    auto tmpargv = argv;
     FFmpegMedia *tyy = new FFmpegMedia(&g_msg_queue);
     if(!tyy){
         cout << "new memory failed" << endl;
@@ -80,6 +81,8 @@ void test_msg_queue(int argc, char **argv){
     tyy->argv = argv;
     ret = tyy->start_async();
     if(ret < 0){
+        delete tyy;
+        tyy = NULL;
         cout << "start_async failed" << endl;
         return;
     }
@@ -88,18 +91,18 @@ void test_msg_queue(int argc, char **argv){
     std::map<std::string, FFmpegMedia*> mfm;
     mfm.insert(std::pair<std::string, FFmpegMedia*>("1", tyy));
 
-    FMMessage *msg = NULL;
+    FMMessage msg;
     while(g_msg_queue.wait_and_pop(msg, -1) > 0){
-        cout << "get msg type: " << msg->what << endl;
+        cout << "get msg type: " << msg.what << endl;
 
         auto it = mfm.find("1");
-        //auto tyy_stream = mfm.find(msg->id);
+        // 1. 流不存在,已经被删除应当检查错误
         if(it == mfm.end()){
-            // 流不存在,已经被删除应当检查错误
             cout << "stream not exist!!!" << endl;
             continue;
         }
 
+        // 2. 从map删除,并回收.
         std::string in, out;
         FFmpegMedia *stream;
         stream = it->second;
@@ -109,17 +112,38 @@ void test_msg_queue(int argc, char **argv){
             cout << "stream is null!!!" << endl;
             continue;
         }
-        in = msg->ifilename;
-        out = msg->ofilename;
+        in = msg.ifilename;
+        out = msg.ofilename;
         //uid = stream->_uid;
         if(stream){
             delete stream;
             stream = NULL;
         }
 
-        switch (msg->what) {
+        // 3. 重连
+        switch (msg.what) {
         case FM_MSG_OPEN_INPUT_FAILED :
-            // 一般是流地址失败
+            // 打开输入流地址失败
+        break;
+        case FM_MSG_OPEN_OUTPUT_FAILED :
+            // 打开输出流地址失败
+            tyy = new FFmpegMedia(&g_msg_queue);
+            if(!tyy){
+                cout << "new memory failed" << endl;
+                return;
+            }
+            tyy->fm_set_input_filename(in.c_str());
+            tyy->fm_set_output_filename(out.c_str());
+            tyy->argc = argc;
+            tyy->argv = tmpargv;
+            ret = tyy->start_async();
+            if(ret < 0){
+                delete tyy;
+                tyy = NULL;
+                cout << "start_async failed" << endl;
+                return;
+            }
+            mfm.insert(std::pair<std::string, FFmpegMedia*>("1", tyy));
         break;
         case FM_MSG_FIND_STREAM_INFO_FAILED :
         break;
@@ -135,9 +159,11 @@ void test_msg_queue(int argc, char **argv){
             tyy->fm_set_input_filename(in.c_str());
             tyy->fm_set_output_filename(out.c_str());
             tyy->argc = argc;
-            tyy->argv = argv;
+            tyy->argv = tmpargv;
             ret = tyy->start_async();
             if(ret < 0){
+                delete tyy;
+                tyy = NULL;
                 cout << "start_async failed" << endl;
                 return;
             }
@@ -145,13 +171,10 @@ void test_msg_queue(int argc, char **argv){
 
         break;
         default:
-            cout << "unkown msg type: " << msg->what << endl;
+            cout << "unkown msg type: " << msg.what << endl;
             break;
         }
 
-        // 消息是否要处理?后续再调
-//        delete msg;
-//        msg = NULL;
     }
 }
 

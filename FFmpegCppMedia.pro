@@ -29,7 +29,6 @@ win32 {
     # x86环境
     INCLUDEPATH += $$PWD/ffmpeg-4.2/include
     INCLUDEPATH += $$PWD/SDL2/include
-    INCLUDEPATH += $$PWD/spdlog
 
     LIBS += $$PWD/ffmpeg-4.2/lib/x86/avformat.lib   \
             $$PWD/ffmpeg-4.2/lib/x86/avcodec.lib    \
@@ -46,7 +45,6 @@ win32 {
     # x64环境
     INCLUDEPATH += $$PWD/ffmpeg-4.2/include
     INCLUDEPATH += $$PWD/SDL2/include
-    INCLUDEPATH += $$PWD/spdlog
 
     LIBS += $$PWD/ffmpeg-4.2/lib/x64/avformat.lib   \
             $$PWD/ffmpeg-4.2/lib/x64/avcodec.lib    \

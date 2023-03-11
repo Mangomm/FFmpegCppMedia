@@ -150,15 +150,17 @@ FFmpegMedia::FFmpegMedia() :
     int_cb({ decode_interrupt_cb, this }),
     program_birth_year(2000)
 {
+    printf("FFmpegMedia()\n");
     memset_zero_fm();
     init_g_options();
     transcode_init_done = 0;
 }
 
-FFmpegMedia::FFmpegMedia(Queue<FMMessage*> *msgqueue) :
+FFmpegMedia::FFmpegMedia(Queue<FMMessage> *msgqueue) :
     int_cb({ decode_interrupt_cb, this }),
     program_birth_year(2000)
 {
+    printf("FFmpegMedia(Queue<FMMessage> *msgqueue)\n");
     memset_zero_fm();
     init_g_options();
     transcode_init_done = 0;
@@ -166,6 +168,7 @@ FFmpegMedia::FFmpegMedia(Queue<FMMessage*> *msgqueue) :
 }
 
 FFmpegMedia::~FFmpegMedia(){
+    printf("~FFmpegMedia()\n");
     if(options){
         delete options;
         options = NULL;
@@ -1901,6 +1904,11 @@ int FFmpegMedia::check_init_output_file(OutputFile *of, int file_index)
                "Could not write header for output file #%d "
                "(incorrect codec parameters ?): %s\n",
                file_index, av_err2str_ex(str, ret));
+        FMMessage fmmsg;
+        fmmsg.what = FM_MSG_INTERLEAVED_WRITE_HEADER_FAILED;
+        fmmsg.ifilename = _input_filename;
+        fmmsg.ofilename = _output_filename;
+        _msg_queue->push(fmmsg);
         return ret;
     }
     //assert_avoptions(of->opts);
@@ -4893,10 +4901,10 @@ int FFmpegMedia::write_packet(OutputFile *of, AVPacket *pkt, OutputStream *ost, 
         print_error("av_interleaved_write_frame()", ret);
         main_return_code = 1;
         close_all_output_streams(ost, OSTFinished(MUXER_FINISHED | ENCODER_FINISHED), ENCODER_FINISHED);
-        FMMessage *fmmsg = new FMMessage();
-        fmmsg->what = FM_MSG_INTERLEAVED_WRITE_FRAME_FAILED;
-        fmmsg->ifilename = _input_filename;
-        fmmsg->ofilename = _output_filename;
+        FMMessage fmmsg;
+        fmmsg.what = FM_MSG_INTERLEAVED_WRITE_FRAME_FAILED;
+        fmmsg.ifilename = _input_filename;
+        fmmsg.ofilename = _output_filename;
         _msg_queue->push(fmmsg);
     }
     av_packet_unref(pkt);
@@ -8682,6 +8690,7 @@ int FFmpegMedia::start(){
 }
 
 int FFmpegMedia::start_async(){
+    // 后续应该将线程开启在写头之后,因为这样确保成功连接到对端.
     int ret = ThreadWrapper::start();
     if(ret == -1){
         printf("start_async failed\n");
@@ -8698,6 +8707,7 @@ void FFmpegMedia::loop(){
 //        }
 //    }
     int ret = 0;
+    /* loop */
     ret = this->start();
 
     printf("FFmpegMedia::loop() exit, ret: %d\n", ret);
@@ -11600,8 +11610,8 @@ int FFmpegMedia::open_files(OptionGroupList *l, const char *inout,
 
         uninit_options(&o);
         if (ret < 0) {
-            av_log(NULL, AV_LOG_ERROR, "Error opening %s file %s.\n",
-                   inout, g->arg);
+//            av_log(NULL, AV_LOG_ERROR, "Error opening %s file %s.\n",
+//                   inout, g->arg);
             return ret;
         }
         av_log(NULL, AV_LOG_DEBUG, "Successfully opened the file.\n");
@@ -12309,10 +12319,10 @@ int FFmpegMedia::open_input_file(OptionsContext *o, const char *filename)
         if (err == AVERROR_PROTOCOL_NOT_FOUND)
             av_log(NULL, AV_LOG_ERROR, "Did you mean file:%s?\n", filename);
 
-        FMMessage *fmmsg = new FMMessage();
-        fmmsg->what = FM_MSG_OPEN_INPUT_FAILED;
-        fmmsg->ifilename = _input_filename;
-        fmmsg->ofilename = _output_filename;
+        FMMessage fmmsg;
+        fmmsg.what = FM_MSG_OPEN_INPUT_FAILED;
+        fmmsg.ifilename = _input_filename;
+        fmmsg.ofilename = _output_filename;
         _msg_queue->push(fmmsg);
 
         //exit_program(1);
@@ -12357,10 +12367,10 @@ int FFmpegMedia::open_input_file(OptionsContext *o, const char *filename)
             av_log(NULL, AV_LOG_FATAL, "%s: could not find codec parameters\n", filename);
             if (ic->nb_streams == 0) {
                 avformat_close_input(&ic);
-                FMMessage *fmmsg = new FMMessage();
-                fmmsg->what = FM_MSG_FIND_STREAM_INFO_FAILED;
-                fmmsg->ifilename = _input_filename;
-                fmmsg->ofilename = _output_filename;
+                FMMessage fmmsg;
+                fmmsg.what = FM_MSG_FIND_STREAM_INFO_FAILED;
+                fmmsg.ifilename = _input_filename;
+                fmmsg.ofilename = _output_filename;
                 _msg_queue->push(fmmsg);
                 //exit_program(1);
                 return -1;
@@ -15035,6 +15045,12 @@ loop_end:
                               &of->opts)) < 0) {
             print_error(filename, err);
             //exit_program(1);
+            FMMessage fmmsg;
+            fmmsg.what = FM_MSG_OPEN_OUTPUT_FAILED;
+            fmmsg.ifilename = _input_filename;
+            fmmsg.ofilename = _output_filename;
+            _msg_queue->push(fmmsg);
+
             return -1;
         }
     } else if (strcmp(oc->oformat->name, "image2")==0 && !av_filename_number_test(filename)){
@@ -15466,7 +15482,7 @@ int FFmpegMedia::ffmpeg_parse_options(int argc, char **argv){
     /* open output files */
     ret = open_files(&octx.groups[GROUP_OUTFILE], "output", open_output_file_ex);
     if (ret < 0) {
-        av_log(NULL, AV_LOG_FATAL, "Error opening output files: ");
+        //av_log(NULL, AV_LOG_FATAL, "Error opening output files: \n");
         goto fail;
     }
 

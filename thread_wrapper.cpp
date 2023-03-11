@@ -6,10 +6,12 @@ ThreadWrapper::ThreadWrapper() :
     _request_abort(false),
     _running(false)
 {
+    printf("ThreadWrapper()\n");
 }
 
 ThreadWrapper::~ThreadWrapper()
 {
+    printf("~ThreadWrapper()\n");
     // stop is safe if multiple call
     stop();
 }
