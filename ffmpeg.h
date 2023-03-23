@@ -1,4 +1,4 @@
-#ifndef FFMPEG_H
+﻿#ifndef FFMPEG_H
 #define FFMPEG_H
 
 /*
@@ -53,7 +53,7 @@ extern "C"{
 #include "libavutil/hwcontext.h"
 #include "libavutil/pixfmt.h"
 #include "libavutil/rational.h"
-//#include "libavutil/thread.h"
+#include "libavutil/thread.h"
 #include "libavutil/threadmessage.h"
 
 #include "libswresample/swresample.h"
@@ -75,6 +75,8 @@ namespace HCMFFmpegMedia {
 //#define TYYCODE_TIMESTAMP_DECODE
 //#define TYYCODE_TIMESTAMP_ENCODER
 //#define TYYCODE_TIMESTAMP_MUXER
+//#define PRINT_G_METADATA            // 打印global metadata
+//#define PRINT_S_METADATA            // 打印stream metadata
 
 //ffmpeg_opt.c
 /**
@@ -708,11 +710,17 @@ enum OptGroup {
     GROUP_INFILE,
 };
 
+#ifdef _MSC_VER
+static const OptionGroupDef groups[] = {
+    { "output url",  NULL, OPT_OUTPUT },
+    { "input url",   "i",  OPT_INPUT },
+};
+#else
 static const OptionGroupDef groups[] = {
     [GROUP_OUTFILE] = { "output url",  NULL, OPT_OUTPUT },
     [GROUP_INFILE]  = { "input url",   "i",  OPT_INPUT },
 };
-
+#endif
 
 #if 1
 class FFmpegMedia : public ThreadWrapper{
@@ -1084,21 +1092,21 @@ public:
 
 public:
     // ffmpeg.h global var
-    InputStream **input_streams;         /*二维数组，用于保存每一个InputStream *输入文件里面的各个流，例如保存了视频流+音频流
+    InputStream **input_streams = NULL;         /*二维数组，用于保存每一个InputStream *输入文件里面的各个流，例如保存了视频流+音频流
     那么input_streams[0]、input_streams[1]就是对应音视频流的信息*/
     int        nb_input_streams;         // input_streams二维数组大小
 
-    InputFile   **input_files;           // 用于保存多个输入文件
+    InputFile   **input_files = NULL;           // 用于保存多个输入文件
     int        nb_input_files;           // 输入文件个数
 
-    OutputStream **output_streams;       // 保存各个输出流的数组
+    OutputStream **output_streams = NULL;       // 保存各个输出流的数组
     int         nb_output_streams;       // output_streams二维数组大小
 
-    OutputFile   **output_files;         // 用于保存多个输出文件
+    OutputFile   **output_files = NULL;         // 用于保存多个输出文件
     int         nb_output_files;         // 输出文件个数
 
-    FilterGraph **filtergraphs;          // 封装好的系统过滤器数组，每个FilterGraph都会包含对应输入流与输出流的的输入输出过滤器。可看init_simple_filtergraph函数
-    int        nb_filtergraphs;          // filtergraphs数组的大小
+    FilterGraph **filtergraphs = NULL;          // 封装好的系统过滤器数组，每个FilterGraph都会包含对应输入流与输出流的的输入输出过滤器。可看init_simple_filtergraph函数
+    int        nb_filtergraphs = 0;          // filtergraphs数组的大小
 
     //char *vstats_filename;               //  由-vstats_file选项管理,设置后可以将视频流的相关信息保存到文件
     //char *sdp_filename;
@@ -1126,7 +1134,7 @@ public:
     //int qp_hist;                         // -qphist选项,默认0,显示QP直方图
     //int stdin_interaction;
     //int frame_bits_per_raw_sample;
-    AVIOContext *progress_avio;
+    AVIOContext *progress_avio = NULL;
     //float max_error_rate;
     char *videotoolbox_pixfmt = NULL;
 
@@ -1172,7 +1180,7 @@ public:
     // ffmpeg_cmdutil.h global var
     //const char program_name[];
     const int program_birth_year;
-    AVCodecContext *avcodec_opts[AVMEDIA_TYPE_NB];
+    AVCodecContext *avcodec_opts[AVMEDIA_TYPE_NB] = {NULL};
     AVFormatContext *avformat_opts = NULL;
     AVDictionary *sws_dict = NULL;
     AVDictionary *swr_opts = NULL;
@@ -1236,8 +1244,8 @@ public:
     int win32_argc = 0;
 
     // ffmpeg_hw.c global var
-    int nb_hw_devices;           // 用户电脑支持的硬件设备数
-    HWDevice **hw_devices;       // 用户电脑支持的硬件设备数组
+    int nb_hw_devices = 0;           // 用户电脑支持的硬件设备数
+    HWDevice **hw_devices = NULL;       // 用户电脑支持的硬件设备数组
 
     // tyy gloabl var
     int argc = 0;
@@ -1256,7 +1264,7 @@ private:
     std::string _output_filename;
 
 private:
-    Queue<FMMessage> *_msg_queue;      // 指向全局队列
+    Queue<FMMessage> *_msg_queue = NULL;      // 指向全局队列
 };
 //extern const OptionDef options[];
 // 硬件的后续完善

@@ -1,4 +1,4 @@
-#include "thread_wrapper.h"
+﻿#include "thread_wrapper.h"
 using namespace HCMFFmpegMedia;
 
 ThreadWrapper::ThreadWrapper() :

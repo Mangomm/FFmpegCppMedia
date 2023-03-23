@@ -1,4 +1,4 @@
-#include <iostream>
+﻿#include <iostream>
 #include <string>
 #include <vector>
 #include <thread>
@@ -6,18 +6,53 @@
 #include "ffmpeg.h"
 #include "version.h"
 #include "msgqueue.hpp"
+#include "poco_mysql.h"
+#include "web_http_server.h"
 using namespace std;
 using namespace HCMFFmpegMedia;
 
+using namespace Poco::Data;
+using namespace Poco::Data::Keywords;
+using Poco::Data::MySQL::ConnectionException;
+using Poco::Data::MySQL::StatementException;
+using Poco::format;
+using Poco::Tuple;
+using Poco::DateTime;
+using Poco::Any;
+using Poco::AnyCast;
+using Poco::NotFoundException;
+using Poco::InvalidAccessException;
+using Poco::BadCastException;
+using Poco::RangeException;
+
+using Poco::LocalDateTime;
+using Poco::DateTime;
+using Poco::DateTimeFormat;
+using Poco::DateTimeFormatter;
+using Poco::DateTimeParser;
+
 HCMFFmpegMedia::Queue<FMMessage> HCMFFmpegMedia::g_msg_queue;
+std::map<std::string, FFmpegMedia*> mfm;
+// 定义一个全局连接池变量
+MysqlSessionPool g_mysql_pool("host=localhost;"
+                              "port=3306;"
+                              "user=root;"
+                              "password=123456;"
+                              "db=test_db;"
+                              "compress=true;"
+                              "auto-reconnect=true"
+                              ";secure-auth=true"
+                              ";ssl-mode=1"
+                              ";protocol=tcp"
+                              "default-character-set=default");
 
-#ifdef __cplusplus
-extern "C"{
-#endif
 
-#ifdef __cplusplus
+void signalHandler(int signum)
+{
+    std::cout << "Interrupt signal (" << signum << ") received, program exit." << std::endl;
+    /// let test_msg_queue while break;
+    g_msg_queue.abort();
 }
-#endif
 
 void test_one(int argc, char **argv){
     // 1路推流测试，目前可以成功播放.
@@ -35,7 +70,7 @@ void test_mul(int argc, char **argv){
     auto Lambda = [=](int i){
         if(i == 1){
             FFmpegMedia tyy;
-            //tyy.fm_set_input_filename("704x576-1Mbps.mp4");Titanic.ts
+            //tyy.fm_set_input_filename("704x576-1Mbps.mp4");
             tyy.fm_set_input_filename("Titanic.ts");
             tyy.fm_set_output_filename("rtmp://192.168.1.10:1935/live/t11");
             tyy.argc = argc;
@@ -72,33 +107,32 @@ void test_msg_queue(int argc, char **argv){
     auto tmpargv = argv;
     FFmpegMedia *tyy = new FFmpegMedia(&g_msg_queue);
     if(!tyy){
-        cout << "new memory failed" << endl;
+        std::cout << "new memory failed" << endl;
         return;
     }
     tyy->fm_set_input_filename("Titanic.ts");
-    tyy->fm_set_output_filename("rtmp://192.168.1.10:1935/live/t1");
+    tyy->fm_set_output_filename("rtmp://192.168.1.118:1935/live/t1");
     tyy->argc = argc;
     tyy->argv = argv;
     ret = tyy->start_async();
     if(ret < 0){
         delete tyy;
         tyy = NULL;
-        cout << "start_async failed" << endl;
+        std::cout << "start_async failed" << endl;
         return;
     }
 
     // 流管理类,后续需要自定义map的uid,方便重推和其它操作.这样以固定uid=1为例
-    std::map<std::string, FFmpegMedia*> mfm;
     mfm.insert(std::pair<std::string, FFmpegMedia*>("1", tyy));
 
     FMMessage msg;
     while(g_msg_queue.wait_and_pop(msg, -1) > 0){
-        cout << "get msg type: " << msg.what << endl;
+        std::cout << "get msg type: " << msg.what << endl;
 
         auto it = mfm.find("1");
         // 1. 流不存在,已经被删除应当检查错误
         if(it == mfm.end()){
-            cout << "stream not exist!!!" << endl;
+            std::cout << "stream not exist!!!" << endl;
             continue;
         }
 
@@ -109,7 +143,7 @@ void test_msg_queue(int argc, char **argv){
         mfm.erase(it);
         if(!stream){
             // 流为空,已经被删除应当检查错误
-            cout << "stream is null!!!" << endl;
+            std::cout << "stream is null!!!" << endl;
             continue;
         }
         in = msg.ifilename;
@@ -129,7 +163,7 @@ void test_msg_queue(int argc, char **argv){
             // 打开输出流地址失败
             tyy = new FFmpegMedia(&g_msg_queue);
             if(!tyy){
-                cout << "new memory failed" << endl;
+                std::cout << "new memory failed" << endl;
                 return;
             }
             tyy->fm_set_input_filename(in.c_str());
@@ -140,7 +174,7 @@ void test_msg_queue(int argc, char **argv){
             if(ret < 0){
                 delete tyy;
                 tyy = NULL;
-                cout << "start_async failed" << endl;
+                std::cout << "start_async failed" << endl;
                 return;
             }
             mfm.insert(std::pair<std::string, FFmpegMedia*>("1", tyy));
@@ -153,7 +187,7 @@ void test_msg_queue(int argc, char **argv){
             // 以写帧失败为例处理
             tyy = new FFmpegMedia(&g_msg_queue);
             if(!tyy){
-                cout << "new memory failed" << endl;
+                std::cout << "new memory failed" << endl;
                 return;
             }
             tyy->fm_set_input_filename(in.c_str());
@@ -164,18 +198,84 @@ void test_msg_queue(int argc, char **argv){
             if(ret < 0){
                 delete tyy;
                 tyy = NULL;
-                cout << "start_async failed" << endl;
+                std::cout << "start_async failed" << endl;
                 return;
             }
             mfm.insert(std::pair<std::string, FFmpegMedia*>("1", tyy));
 
         break;
         default:
-            cout << "unkown msg type: " << msg.what << endl;
+            std::cout << "unkown msg type: " << msg.what << std::endl;
             break;
         }
 
     }
+
+    std::cout << "test_msg_queue function end" << std::endl;
+}
+
+void test_mysql() {
+
+    try {
+        // 从连接池中获取一个session
+        Session session(g_mysql_pool.get());
+        std::string id("1");
+        int uid;
+        std::string name;
+        bool isok;
+
+        // 方式1
+        session << "SELECT  USERID, MYNAME, ISOK from USERINFO where id = ?",
+            use(id), into(uid), into(name), into(isok), now;
+        std::cout << "uid: " << uid << ", name: " << name << ", isok: " << isok << std::endl;
+
+        // 方式2: 建立查询执行器
+        id = "2";
+        Statement select(session);
+        select << "SELECT USERID, MYNAME, ISOK from USERINFO where id = ?",
+            use(id),
+            into(uid),
+            into(name),
+            into(isok),
+            range(0, 1); //  每次放一条纪录
+        while (!select.done())
+        {
+            select.execute();
+            std::cout << "uid: " << uid << ", name: " << name << ", isok: " << isok << std::endl;
+        }
+
+        session.close();  // <推荐> 显式关闭连接
+    }
+    catch (Exception& e) {
+        std::cerr << e.displayText() << std::endl;
+    }
+
+    return;
+}
+
+void test_poco_http(){
+    int port = 8088;
+
+    // Need Handler Factory
+    Poco::Net::HTTPRequestHandlerFactory::Ptr factory(new Web::WebRequestHandlerFactory());
+
+    // Net ServerSocket
+    Poco::Net::ServerSocket ss(port);
+    std::cout<< "listen port: " << port << std::endl;
+
+    // Need a ThreadPool
+    Poco::ThreadPool pool;
+
+    // Need HTTPServerParams::Ptr
+    Poco::Net::HTTPServerParams::Ptr pParams(new Poco::Net::HTTPServerParams());
+    Poco::Net::HTTPServer server(factory, pool,  ss, pParams);
+    server.start();
+
+    // This is a bit of a hack to have the server running until a key is pressed
+    std::string s;
+    std::cin >> s;// block here
+
+    server.stop();
 }
 
 int main(int argc, char **argv)
@@ -187,8 +287,27 @@ int main(int argc, char **argv)
    test_one(argc, argv);
 #elif 0
     test_mul(argc, argv);
-#elif true
+#elif 0
+    /// 注意,debug模式触发信号会报段错误,这是正常的.
+    signal(SIGINT, signalHandler);
     test_msg_queue(argc, argv);
+
+exit:
+    std::cout<< "g_msg_queue size: " << g_msg_queue.size() << ", mfm size: " << mfm.size() << std::endl;
+    g_msg_queue.clear();
+    for(auto it = mfm.begin(); it != mfm.end();){
+        auto fm = it->second;
+        if(fm){
+            fm->stop_async();
+            delete fm;
+            fm = NULL;
+        }
+        it = mfm.erase(it);
+    }
+#elif 0
+    test_mysql();
+#elif 1
+    test_poco_http();
 #endif
 
     cout << "main function end!" << endl;

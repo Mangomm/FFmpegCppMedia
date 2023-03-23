@@ -6,3 +6,12 @@
 0.0.5：完全去掉ffmpeg.c本身调用exit_program()函数的代码。<br> 
 0.0.6：增加消息队列的处理。目前以写帧失败进行测试，没问题。后续补充一个流管理的类进行处理。<br> 
 0.0.7：增加test_msg_queue()消息队列测试，以打开输出流失败以及写帧失败为例子，进行重推，目前已经测试通过。<br> 
+
+0.1.0：
+	1. 支持msvc编译器调试ffmpeg.c。
+	2. 增加poco、mysql库。注，poco库只支持msvc编译器，mingw调试ffmpeg+poco的话，需要用mingw额外编译poco。<br> 
+	3. 修复轮流推不同文件到同一输出流地址时(即一个文件推到rtmp://xxx/t1并结束，另一个文件继续推到rtmp://xxx/t1)，写帧会失败的问题。原因是在start()的transcode()结束后，<br> 
+		应该也调用ffmpeg_cleanup()回收,不应该只在析构调用,因为调用者不一定会有delete操作。<br> 
+	4. 增加FFmpegMedia类的stop_async()停止推流函数。<br> 
+	5. 完善队列类，增加中断队列的操作。<br> 
+	

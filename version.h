@@ -1,4 +1,4 @@
-#ifndef VERSION_H
+﻿#ifndef VERSION_H
 #define VERSION_H
 
 #include <string>
@@ -7,8 +7,8 @@ namespace HCMFFmpegMedia {
 static std::string g_version_str;
 
 #define FFMPEG_MEDIA_VERSION_MAJOR 0
-#define FFMPEG_MEDIA_VERSION_MINOR 0
-#define FFMPEG_MEDIA_VERSION_REVISION 7
+#define FFMPEG_MEDIA_VERSION_MINOR 1
+#define FFMPEG_MEDIA_VERSION_REVISION 0
 
 #define FFMPEG_MEDIA_VERSION_STATUS "HCMFFmpegMedia"
 

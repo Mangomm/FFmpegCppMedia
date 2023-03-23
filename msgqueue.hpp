@@ -1,4 +1,4 @@
-#ifndef MSGQUEUE_HPP
+﻿#ifndef MSGQUEUE_HPP
 #define MSGQUEUE_HPP
 
 #include <queue>
@@ -27,6 +27,9 @@ public:
     {
         std::shared_ptr<T> data(std::make_shared<T>(std::move(new_value)));// 这里不会发生拷贝
         std::lock_guard<std::mutex> lk(_mut);
+        if(_abort_request) {
+            return;
+        }
         _data_queue.push(data);// 这里不会发生拷贝，但引用数加1
         _data_cond.notify_one();
     }
@@ -34,9 +37,17 @@ public:
     void wait_and_pop(T& value)
     {
         std::unique_lock<std::mutex> lk(_mut);
+        if(_abort_request) {
+            return;
+        }
+
         _data_cond.wait(lk, [this] {
-            return !_data_queue.empty();
+            return !_data_queue.empty() | _abort_request;
         });
+        /// ensure _data_queue not is empty.
+        if(_abort_request){
+            return;
+        }
         value = std::move(*_data_queue.front());
         _data_queue.pop();
     }
@@ -53,6 +64,11 @@ public:
         int ret;
 
         for (;;) {
+            if(_abort_request) {
+                ret = -1;
+                break;
+            }
+
             if (!_data_queue.empty()) {
                 value = std::move(*_data_queue.front());
                 _data_queue.pop();
@@ -68,13 +84,13 @@ public:
 
             else if (timeout < 0) {
                 _data_cond.wait(lock, [this] {
-                    return !_data_queue.empty();
+                    return !_data_queue.empty() | _abort_request;
                 });
             }
 
             else if (timeout > 0) {
                 _data_cond.wait_for(lock, std::chrono::milliseconds(timeout), [this] {
-                    return !_data_queue.empty();
+                    return !_data_queue.empty() | _abort_request;
                 });
 
                 if (_data_queue.empty()) {
@@ -95,9 +111,16 @@ public:
     std::shared_ptr<T> wait_and_pop()
     {
         std::unique_lock<std::mutex> lk(_mut);
+        if(_abort_request) {
+            return std::shared_ptr<T>();
+        }
         _data_cond.wait(lk, [this] {
-            return !_data_queue.empty();
+            return !_data_queue.empty() | _abort_request;
         });
+        /// ensure _data_queue not is empty.
+        if(_abort_request){
+            return std::shared_ptr<T>();
+        }
         std::shared_ptr<T> res = _data_queue.front();
         _data_queue.pop();
         return res;
@@ -106,6 +129,9 @@ public:
     bool try_pop(T& value)
     {
         std::lock_guard<std::mutex> lk(_mut);
+        if(_abort_request){
+            return false;
+        }
         if (_data_queue.empty())
             return false;
         value = std::move(*_data_queue.front());
@@ -115,6 +141,9 @@ public:
     std::shared_ptr<T> try_pop()
     {
         std::lock_guard<std::mutex> lk(_mut);
+        if(_abort_request){
+            return std::shared_ptr<T>();
+        }
         if (_data_queue.empty())
             return std::shared_ptr<T>();
         std::shared_ptr<T> res = _data_queue.front();
@@ -128,8 +157,19 @@ public:
         return _data_queue.empty();
     }
 
+    int size(){
+        std::lock_guard<std::mutex> lk(_mut);
+        return _data_queue.size();
+    }
+
     void notify_one()
     {
+        _data_cond.notify_one();
+    }
+
+    void abort(){
+        std::lock_guard<std::mutex> lk(_mut);
+        _abort_request = 1;
         _data_cond.notify_one();
     }
 
@@ -146,6 +186,7 @@ private:
     mutable std::mutex _mut;
     std::queue< std::shared_ptr<T> > _data_queue;
     std::condition_variable _data_cond;
+    int _abort_request = 0;
 };
 
 

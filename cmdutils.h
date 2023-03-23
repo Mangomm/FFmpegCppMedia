@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Various utilities for command line tools
  * copyright (c) 2003 Fabrice Bellard
  *
@@ -160,16 +160,16 @@ typedef struct SpecifierOpt {
 typedef struct OptionDef {
     const char *name;
     int flags;
-#define HAS_ARG    0x0001
-#define OPT_BOOL   0x0002
+#define HAS_ARG    0x0001   // (全局选项数组)该key带有value值
+#define OPT_BOOL   0x0002   // 该key可以是一个布尔值0或者1
 #define OPT_EXPERT 0x0004
-#define OPT_STRING 0x0008
-#define OPT_VIDEO  0x0010
-#define OPT_AUDIO  0x0020
-#define OPT_INT    0x0080
-#define OPT_FLOAT  0x0100
+#define OPT_STRING 0x0008   // 该key可以是一个字符串类型的值
+#define OPT_VIDEO  0x0010   // 该key属于视频流的参数
+#define OPT_AUDIO  0x0020   // 该key属于音频流的参数
+#define OPT_INT    0x0080   // 该key可以是一个int类型的值
+#define OPT_FLOAT  0x0100   // 该key可以是一个float类型的值
 #define OPT_SUBTITLE 0x0200
-#define OPT_INT64  0x0400
+#define OPT_INT64  0x0400   // 该key可以是一个int64类型的值
 #define OPT_EXIT   0x0800
 #define OPT_DATA   0x1000
 #define OPT_PERFILE  0x2000     /* the option is per-file (currently ffmpeg-only).
@@ -178,10 +178,10 @@ typedef struct OptionDef {
 #define OPT_SPEC   0x8000       /* option is to be stored in an array of SpecifierOpt.
                                    Implies OPT_OFFSET. Next element after the offset is
                                    an int containing element count in the array. */
-#define OPT_TIME  0x10000
-#define OPT_DOUBLE 0x20000
-#define OPT_INPUT  0x40000
-#define OPT_OUTPUT 0x80000
+#define OPT_TIME  0x10000   // 该key可以是一个时间类型的值,在解析时会去到解析时间的函数
+#define OPT_DOUBLE 0x20000  // 该key可以是一个double类型的值
+#define OPT_INPUT  0x40000  // 该key属于输入参数
+#define OPT_OUTPUT 0x80000  // 该key属于输出参数
 //     union {
 //        void *dst_ptr;
 //        int (*func_arg)(void *, const char *, const char *);
@@ -316,8 +316,9 @@ typedef struct OptionGroupDef {
 } OptionGroupDef;
 
 typedef struct OptionGroup {
-    const OptionGroupDef *group_def;
-    const char *arg;
+    const OptionGroupDef *group_def;    /* 指向OptionGroupList的group_def,实际就是指向static const OptionGroupDef groups[]全局数组的某一个元素,
+                                         * 用来标记这个Option *opts结构里面的参数是属于输入还是输出文件. */
+    const char *arg;                    // 一般是文件名.
 
     Option *opts;
     int  nb_opts;
@@ -334,17 +335,19 @@ typedef struct OptionGroup {
  * (e.g. input files or output files)
  */
 typedef struct OptionGroupList {
-    const OptionGroupDef *group_def;
+    const OptionGroupDef *group_def;// 实际指向static const OptionGroupDef groups[]全局数组的某一个元素,
+                                    // 用来标记这个OptionGroupList结构是属于输入还是输出文件
 
     OptionGroup *groups;
     int       nb_groups;
 } OptionGroupList;
 
 typedef struct OptionParseContext {
-    OptionGroup global_opts;
+    OptionGroup global_opts;        // 全局选项.
 
-    OptionGroupList *groups;
-    int           nb_groups;
+    OptionGroupList *groups;        // 保存输入或者输出文件的相关参数.
+    int           nb_groups;        // groups数组的大小.实际上是
+                                    // static const OptionGroupDef groups[]数组的大小,固定是2.
 
     /* parsing state */
     OptionGroup cur_group;
